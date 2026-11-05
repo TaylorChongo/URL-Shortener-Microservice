@@ -1,14 +1,14 @@
 import secrets
 import string
 
-from app.storage import InMemoryStorage
+from app.storage import InMemoryStorage, RedisStorage
 
 ALPHABET = string.ascii_letters + string.digits
 CODE_LENGTH = 6
 
 
 class UrlShortenerService:
-    def __init__(self, storage: InMemoryStorage) -> None:
+    def __init__(self, storage: InMemoryStorage | RedisStorage) -> None:
         self.storage = storage
 
     def generate_code(self) -> str:

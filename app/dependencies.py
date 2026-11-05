@@ -1,9 +1,9 @@
+from app.config import REDIS_URL
 from app.services import UrlShortenerService
-from app.storage import InMemoryStorage
+from app.storage import RedisStorage
 
-storage = InMemoryStorage()
+storage = RedisStorage(REDIS_URL)
 
 
 def get_shortener_service() -> UrlShortenerService:
     return UrlShortenerService(storage)
-
