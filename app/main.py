@@ -32,7 +32,7 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unexpected_exception_handler)
 
-    @app.get("/health")
+    @app.get("/health", tags=["health"], summary="Check that the service is running")
     def health():
         return {"status": "ok", "env": APP_ENV}
 
