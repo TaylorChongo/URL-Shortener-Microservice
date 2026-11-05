@@ -1,6 +1,9 @@
+import logging
+
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import APP_ENV, DEBUG
 from app.errors import (
@@ -8,12 +11,16 @@ from app.errors import (
     unexpected_exception_handler,
     validation_exception_handler,
 )
+from app.middleware import log_requests
 from app.routes import router
 
 
 def create_app() -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
     app = FastAPI(title="URL Shortener", debug=DEBUG)
     app.include_router(router)
+    app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
