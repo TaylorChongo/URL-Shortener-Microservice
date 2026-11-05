@@ -17,7 +17,8 @@ from app.routes import router
 
 def create_app() -> FastAPI:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-
+    logging.getLogger("uvicorn.access").disabled = True
+    
     app = FastAPI(title="URL Shortener", debug=DEBUG)
     app.include_router(router)
     app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
