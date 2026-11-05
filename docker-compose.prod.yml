@@ -1,0 +1,14 @@
+# Production profile: use together with docker-compose.yml
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+services:
+  api:
+    command: !reset null
+    volumes: !reset []
+    environment:
+      APP_ENV: production
+      DEBUG: "False"
+      WEB_CONCURRENCY: 4
+    restart: unless-stopped
+
+  redis:
+    restart: unless-stopped
