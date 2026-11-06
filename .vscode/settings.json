@@ -1,3 +1,8 @@
 {
-    "python.terminal.useEnvFile": true
+    "python.terminal.useEnvFile": true,
+    "yaml.customTags": [
+        "!reset scalar",
+        "!reset sequence",
+        "!override sequence"
+    ]
 }
