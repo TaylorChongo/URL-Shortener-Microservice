@@ -12,3 +12,7 @@ services:
 
   redis:
     restart: unless-stopped
+
+  db:
+    ports: !reset []
+    restart: unless-stopped
