@@ -21,6 +21,8 @@ RUN useradd --create-home appuser
 
 COPY --from=builder /opt/venv /opt/venv
 COPY app ./app
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 USER appuser
 

@@ -10,9 +10,6 @@ services:
       WEB_CONCURRENCY: 4
     restart: unless-stopped
 
-  redis:
-    restart: unless-stopped
-
   db:
     ports: !reset []
     restart: unless-stopped
