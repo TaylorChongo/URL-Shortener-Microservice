@@ -130,13 +130,53 @@ Port **5433** is used on the host so it doesn't clash with a PostgreSQL installe
 
 ## Database and ORM
 
-### Tables and relationships
+### Tables and relationships (ERD)
 
+```mermaid
+erDiagram
+    users ||--o{ urls : "owns"
+    urls ||--o{ clicks : "receives"
+    urls ||--o{ url_tags : "is tagged"
+    tags ||--o{ url_tags : "labels"
+
+    users {
+        int id PK
+        varchar email UK "max 255, unique index"
+        varchar hashed_password "bcrypt hash, max 255"
+        boolean is_active "default true"
+        timestamptz created_at "default now()"
+    }
+
+    urls {
+        int id PK
+        varchar short_code UK "max 10, unique index"
+        text original_url
+        timestamptz created_at "default now()"
+        int user_id FK "users.id, on delete cascade"
+    }
+
+    clicks {
+        int id PK
+        int url_id FK "urls.id, on delete cascade"
+        timestamptz clicked_at "default now()"
+    }
+
+    tags {
+        int id PK
+        varchar name UK "max 50, unique index"
+    }
+
+    url_tags {
+        int url_id PK, FK "urls.id, on delete cascade"
+        int tag_id PK, FK "tags.id, on delete cascade"
+    }
 ```
-users ──< urls ──< clicks                 one-to-many (twice)
-            │
-            └──< url_tags >── tags        many-to-many through a linking table
-```
+
+How to read it:
+- `||--o{` means **one to many**. One user owns zero or more URLs, and one URL receives zero or more clicks.
+- `urls` ↔ `tags` is **many-to-many**: a link can have many tags, and a tag can be on many links. The `url_tags` table in the middle holds one row per link–tag pair.
+- `PK` primary key · `FK` foreign key · `UK` unique.
+- Composite indexes, which the diagram can't show: `urls (user_id, id)` and `clicks (url_id, clicked_at)`. See [Indexes](#indexes-and-how-they-were-checked).
 
 | Table | Columns | Constraints and indexes |
 |---|---|---|
