@@ -14,7 +14,11 @@ from app.models import URL, User
 from app.repositories import TagRepository, URLRepository, UserRepository
 from app.schemas import (
     ErrorResponse,
+    DayClicks,
     ShortenRequest,
+    StatsResponse,
+    TagCount,
+    TopURL,
     URLResponse,
     URLUpdate,
     UserCreate,
@@ -76,13 +80,14 @@ def login(current_user: User = Depends(get_current_user)) -> UserRead:
 router = APIRouter(prefix="/api", tags=["shortener"])
 
 
-def to_url_response(url: URL) -> URLResponse:
+def to_url_response(url: URL, click_count: int) -> URLResponse:
     return URLResponse(
         id=url.id,
         short_code=url.short_code,
         short_url=f"{BASE_URL}/api/{url.short_code}",
         original_url=url.original_url,
         tags=[tag.name for tag in url.tags],
+        click_count=click_count,
         created_at=url.created_at,
     )
 
@@ -107,7 +112,7 @@ def create_short_url(
     service: UrlShortenerService = Depends(get_shortener_service),
 ) -> URLResponse:
     url = service.shorten(user_id=current_user.id, original_url=str(body.url), tag_names=body.tags)
-    return to_url_response(url)
+    return to_url_response(url, click_count=0)
 
 @router.get(
     "/{code}",
@@ -162,7 +167,35 @@ def list_urls(
     urls: URLRepository = Depends(get_url_repository),
 ) -> list[URLResponse]:
     page = urls.list_for_user(user_id=current_user.id, limit=limit, offset=offset)
-    return [to_url_response(url) for url in page]
+    counts = urls.click_counts([url.id for url in page])
+    return [to_url_response(url, click_count=counts.get(url.id, 0)) for url in page]
+
+
+@urls_router.get(
+    "/stats",
+    response_model=StatsResponse,
+    summary="Statistics about your URLs",
+    description=(
+        "Login required. Totals across all your links: how many links and clicks you have, "
+        "your 5 most clicked links, clicks per day for the last 7 days, and how many links use each tag."
+    ),
+    responses={**NOT_LOGGED_IN},
+)
+def get_stats(
+    current_user: User = Depends(get_current_user),
+    urls: URLRepository = Depends(get_url_repository),
+) -> StatsResponse:
+    user_id = current_user.id
+    return StatsResponse(
+        total_urls=urls.count_urls(user_id),
+        total_clicks=urls.count_clicks(user_id),
+        top_urls=[
+            TopURL(short_code=row.short_code, original_url=row.original_url, clicks=row.clicks)
+            for row in urls.top_urls(user_id, limit=5)
+        ],
+        clicks_last_7_days=[DayClicks(day=row.day, clicks=row.clicks) for row in urls.clicks_per_day(user_id, days=7)],
+        urls_per_tag=[TagCount(tag=row.name, urls=row.urls) for row in urls.urls_per_tag(user_id)],
+    )
 
 
 @urls_router.get(
@@ -178,7 +211,8 @@ def get_url(
     urls: URLRepository = Depends(get_url_repository),
 ) -> URLResponse:
     url = get_own_url_or_404(urls, current_user, url_id)
-    return to_url_response(url)
+    counts = urls.click_counts([url.id])
+    return to_url_response(url, click_count=counts.get(url.id, 0))
 
 
 @urls_router.patch(
@@ -206,7 +240,8 @@ def update_url(
         new_tags = tags.get_or_create(body.tags)
 
     url = urls.update(url, original_url=new_original_url, tags=new_tags)
-    return to_url_response(url)
+    counts = urls.click_counts([url.id])
+    return to_url_response(url, click_count=counts.get(url.id, 0))
 
 
 @urls_router.delete(

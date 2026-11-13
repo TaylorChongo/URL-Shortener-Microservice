@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
@@ -42,7 +42,32 @@ class URLResponse(BaseModel):
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
     tags: list[str] = Field(examples=[["shopping", "books"]])
+    click_count: int = Field(description="How many times the short link was opened", examples=[12])
     created_at: datetime
+
+
+class TopURL(BaseModel):
+    short_code: str = Field(examples=["aB3xY9"])
+    original_url: str = Field(examples=["https://www.python.org/"])
+    clicks: int = Field(examples=[12])
+
+
+class DayClicks(BaseModel):
+    day: date
+    clicks: int = Field(examples=[5])
+
+
+class TagCount(BaseModel):
+    tag: str = Field(examples=["shopping"])
+    urls: int = Field(examples=[3])
+
+
+class StatsResponse(BaseModel):
+    total_urls: int = Field(examples=[8])
+    total_clicks: int = Field(examples=[42])
+    top_urls: list[TopURL]
+    clicks_last_7_days: list[DayClicks]
+    urls_per_tag: list[TagCount]
 
 
 class UserCreate(BaseModel):

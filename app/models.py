@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, String, Table, Text, func
+from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Table, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -27,12 +27,14 @@ class User(Base):
 
 class URL(Base):
     __tablename__ = "urls"
+    # "my links, newest first": filter by user_id, then read ids in order (no extra sort)
+    __table_args__ = (Index("ix_urls_user_id_id", "user_id", "id"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     short_code: Mapped[str] = mapped_column(String(10), unique=True, index=True)
     original_url: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
     owner: Mapped["User"] = relationship(back_populates="urls")
     clicks: Mapped[list["Click"]] = relationship(back_populates="url", passive_deletes=True)
@@ -41,9 +43,11 @@ class URL(Base):
 
 class Click(Base):
     __tablename__ = "clicks"
+    # "clicks of these links (since a date)": filter by url_id, then by clicked_at
+    __table_args__ = (Index("ix_clicks_url_id_clicked_at", "url_id", "clicked_at"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    url_id: Mapped[int] = mapped_column(ForeignKey("urls.id", ondelete="CASCADE"), index=True)
+    url_id: Mapped[int] = mapped_column(ForeignKey("urls.id", ondelete="CASCADE"))
     clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     url: Mapped["URL"] = relationship(back_populates="clicks")
