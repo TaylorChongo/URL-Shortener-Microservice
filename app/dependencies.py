@@ -19,6 +19,14 @@ def get_user_repository(db: Session = Depends(get_db)) -> UserRepository:
     return UserRepository(db)
 
 
+def get_url_repository(db: Session = Depends(get_db)) -> URLRepository:
+    return URLRepository(db)
+
+
+def get_tag_repository(db: Session = Depends(get_db)) -> TagRepository:
+    return TagRepository(db)
+
+
 def get_current_user(
     credentials: HTTPBasicCredentials = Depends(basic_auth),
     users: UserRepository = Depends(get_user_repository),

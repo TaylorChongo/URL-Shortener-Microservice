@@ -19,6 +19,20 @@ class ShortenRequest(BaseModel):
     )
 
 
+class URLUpdate(BaseModel):
+    url: HttpUrl | None = Field(
+        default=None,
+        description="The new long URL. Leave it out to keep the current one.",
+        examples=["https://www.python.org"],
+    )
+    tags: list[TagName] | None = Field(
+        default=None,
+        max_length=10,
+        description="The new list of tags (replaces the old ones). Leave it out to keep the current tags, send [] to remove all.",
+        examples=[["learning"]],
+    )
+
+
 class URLResponse(BaseModel):
     id: int = Field(examples=[1])
     short_code: str = Field(description="The unique 6-character code", examples=["aB3xY9"])

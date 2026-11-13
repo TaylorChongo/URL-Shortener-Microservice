@@ -1,15 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import BASE_URL
-from app.dependencies import get_current_user, get_shortener_service, get_user_repository
+from app.dependencies import (
+    get_current_user,
+    get_shortener_service,
+    get_tag_repository,
+    get_url_repository,
+    get_user_repository,
+)
 from app.models import URL, User
-from app.repositories import UserRepository
+from app.repositories import TagRepository, URLRepository, UserRepository
 from app.schemas import (
     ErrorResponse,
     ShortenRequest,
     URLResponse,
+    URLUpdate,
     UserCreate,
     UserRead,
     ValidationErrorResponse,
@@ -127,3 +134,93 @@ def redirect_to_url(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
     return RedirectResponse(url=original_url, status_code=status.HTTP_302_FOUND)
     
+
+urls_router = APIRouter(prefix="/api/urls", tags=["urls"])
+
+NOT_FOUND = {404: {"model": ErrorResponse, "description": "No URL with this id belongs to you"}}
+NOT_LOGGED_IN = {401: {"model": ErrorResponse, "description": "You are not logged in"}}
+
+
+def get_own_url_or_404(urls: URLRepository, user: User, url_id: int) -> URL:
+    url = urls.get_for_user(user_id=user.id, url_id=url_id)
+    if url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="URL not found")
+    return url
+
+
+@urls_router.get(
+    "",
+    response_model=list[URLResponse],
+    summary="List your URLs",
+    description="Login required. Returns only your own links, newest first, one page at a time.",
+    responses={**NOT_LOGGED_IN},
+)
+def list_urls(
+    limit: int = Query(default=20, ge=1, le=100, description="How many links per page"),
+    offset: int = Query(default=0, ge=0, description="How many links to skip"),
+    current_user: User = Depends(get_current_user),
+    urls: URLRepository = Depends(get_url_repository),
+) -> list[URLResponse]:
+    page = urls.list_for_user(user_id=current_user.id, limit=limit, offset=offset)
+    return [to_url_response(url) for url in page]
+
+
+@urls_router.get(
+    "/{url_id}",
+    response_model=URLResponse,
+    summary="Get one of your URLs",
+    description="Login required. Returns 404 if the URL does not exist or is not yours.",
+    responses={**NOT_LOGGED_IN, **NOT_FOUND},
+)
+def get_url(
+    url_id: int,
+    current_user: User = Depends(get_current_user),
+    urls: URLRepository = Depends(get_url_repository),
+) -> URLResponse:
+    url = get_own_url_or_404(urls, current_user, url_id)
+    return to_url_response(url)
+
+
+@urls_router.patch(
+    "/{url_id}",
+    response_model=URLResponse,
+    summary="Update one of your URLs",
+    description="Login required. Send only what you want to change: the long URL, the tags, or both.",
+    responses={**NOT_LOGGED_IN, **NOT_FOUND},
+)
+def update_url(
+    url_id: int,
+    body: URLUpdate,
+    current_user: User = Depends(get_current_user),
+    urls: URLRepository = Depends(get_url_repository),
+    tags: TagRepository = Depends(get_tag_repository),
+) -> URLResponse:
+    url = get_own_url_or_404(urls, current_user, url_id)
+
+    new_original_url = None
+    if body.url is not None:
+        new_original_url = str(body.url)
+
+    new_tags = None
+    if body.tags is not None:
+        new_tags = tags.get_or_create(body.tags)
+
+    url = urls.update(url, original_url=new_original_url, tags=new_tags)
+    return to_url_response(url)
+
+
+@urls_router.delete(
+    "/{url_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete one of your URLs",
+    description="Login required. Its clicks and tag links are deleted too.",
+    responses={**NOT_LOGGED_IN, **NOT_FOUND},
+)
+def delete_url(
+    url_id: int,
+    current_user: User = Depends(get_current_user),
+    urls: URLRepository = Depends(get_url_repository),
+) -> Response:
+    url = get_own_url_or_404(urls, current_user, url_id)
+    urls.delete(url)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
