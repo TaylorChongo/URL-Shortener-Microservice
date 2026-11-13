@@ -3,7 +3,8 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 
 from app.config import BASE_URL
-from app.dependencies import get_shortener_service, get_user_repository
+from app.dependencies import get_current_user, get_shortener_service, get_user_repository
+from app.models import User
 from app.repositories import UserRepository
 from app.schemas import (
     ErrorResponse,
@@ -46,6 +47,23 @@ def register(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
 
     return user
+
+
+@auth_router.post(
+    "/login",
+    response_model=UserRead,
+    summary="Check your email and password",
+    description=(
+        "Uses HTTP Basic authentication. In Swagger, click the 'Authorize' button, "
+        "enter your email as the username and your password, then call this endpoint."
+    ),
+    responses={
+        401: {"model": ErrorResponse, "description": "The email or password is incorrect"},
+        403: {"model": ErrorResponse, "description": "The account is disabled"},
+    },
+)
+def login(current_user: User = Depends(get_current_user)) -> UserRead:
+    return current_user
 
 
 router = APIRouter(prefix="/api", tags=["shortener"])
