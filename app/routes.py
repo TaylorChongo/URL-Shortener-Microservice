@@ -1,10 +1,51 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
+from sqlalchemy.exc import IntegrityError
 
 from app.config import BASE_URL
-from app.dependencies import get_shortener_service
-from app.schemas import ErrorResponse, ShortenRequest, ShortenResponse, ValidationErrorResponse
+from app.dependencies import get_shortener_service, get_user_repository
+from app.repositories import UserRepository
+from app.schemas import (
+    ErrorResponse,
+    ShortenRequest,
+    ShortenResponse,
+    UserCreate,
+    UserRead,
+    ValidationErrorResponse,
+)
+from app.security import hash_password
 from app.services import UrlShortenerService
+
+
+auth_router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@auth_router.post(
+    "/register",
+    response_model=UserRead,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create a new account",
+    description="Send an email and a password (8 to 72 characters). The password is stored hashed, never as plain text.",
+    responses={
+        409: {"model": ErrorResponse, "description": "This email is already registered"},
+        422: {"model": ValidationErrorResponse, "description": "The email or password is not valid"},
+    },
+)
+def register(
+    body: UserCreate,
+    users: UserRepository = Depends(get_user_repository),
+) -> UserRead:
+    email = body.email.lower()
+
+    if users.get_by_email(email) is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
+
+    try:
+        user = users.create(email=email, hashed_password=hash_password(body.password))
+    except IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already registered")
+
+    return user
 
 
 router = APIRouter(prefix="/api", tags=["shortener"])

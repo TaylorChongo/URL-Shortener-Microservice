@@ -1,4 +1,6 @@
-from pydantic import BaseModel, Field, HttpUrl
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
 
 
 class ShortenRequest(BaseModel):
@@ -15,6 +17,20 @@ class ShortenResponse(BaseModel):
         description="The long URL that was shortened",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
+
+
+class UserCreate(BaseModel):
+    email: EmailStr = Field(examples=["ama@mail.com"])
+    password: str = Field(min_length=8, max_length=72, examples=["secret123"])
+
+
+class UserRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True) # allows reading the attributes using the dot notation without it, it can only accepts dictionary keys
+
+    id: int = Field(examples=[1])
+    email: str = Field(examples=["ama@mail.com"])
+    is_active: bool = Field(examples=[True])
+    created_at: datetime
 
 
 class ErrorResponse(BaseModel):

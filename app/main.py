@@ -12,7 +12,7 @@ from app.errors import (
     validation_exception_handler,
 )
 from app.middleware import log_requests
-from app.routes import router
+from app.routes import auth_router, router
 
 
 def create_app() -> FastAPI:
@@ -25,6 +25,7 @@ def create_app() -> FastAPI:
         version="1.0.0",
         debug=DEBUG,
     )
+    app.include_router(auth_router)
     app.include_router(router)
     app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
