@@ -2,20 +2,17 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from sqlalchemy.orm import Session
 
-from app.config import REDIS_URL
 from app.database import get_db
 from app.models import User
-from app.repositories import UserRepository
+from app.repositories import TagRepository, URLRepository, UserRepository
 from app.security import verify_password
 from app.services import UrlShortenerService
-from app.storage import RedisStorage
 
-storage = RedisStorage(REDIS_URL)
 basic_auth = HTTPBasic()
 
 
-def get_shortener_service() -> UrlShortenerService:
-    return UrlShortenerService(storage)
+def get_shortener_service(db: Session = Depends(get_db)) -> UrlShortenerService:
+    return UrlShortenerService(URLRepository(db), TagRepository(db))
 
 
 def get_user_repository(db: Session = Depends(get_db)) -> UserRepository:

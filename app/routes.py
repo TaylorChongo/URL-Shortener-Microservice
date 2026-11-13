@@ -4,12 +4,12 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import BASE_URL
 from app.dependencies import get_current_user, get_shortener_service, get_user_repository
-from app.models import User
+from app.models import URL, User
 from app.repositories import UserRepository
 from app.schemas import (
     ErrorResponse,
     ShortenRequest,
-    ShortenResponse,
+    URLResponse,
     UserCreate,
     UserRead,
     ValidationErrorResponse,
@@ -68,26 +68,39 @@ def login(current_user: User = Depends(get_current_user)) -> UserRead:
 
 router = APIRouter(prefix="/api", tags=["shortener"])
 
+
+def to_url_response(url: URL) -> URLResponse:
+    return URLResponse(
+        id=url.id,
+        short_code=url.short_code,
+        short_url=f"{BASE_URL}/api/{url.short_code}",
+        original_url=url.original_url,
+        tags=[tag.name for tag in url.tags],
+        created_at=url.created_at,
+    )
+
+
 @router.post(
     "/shorten",
-    response_model=ShortenResponse,
+    response_model=URLResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a short URL",
-    description="Send a long URL and get back a unique 6-character short code and a ready-to-share short link.",
-    responses={422: {"model": ValidationErrorResponse, "description": "The URL is missing or not valid"}},
+    description=(
+        "Login required. Send a long URL (and optional tags) and get back a unique "
+        "6-character short code and a ready-to-share short link. The link belongs to you."
+    ),
+    responses={
+        401: {"model": ErrorResponse, "description": "You are not logged in"},
+        422: {"model": ValidationErrorResponse, "description": "The URL or tags are not valid"},
+    },
 )
 def create_short_url(
-        body: ShortenRequest,
-        service: UrlShortenerService = Depends(get_shortener_service)
-) -> ShortenResponse:
-    original_url = str(body.url)
-    code = service.shorten(original_url)
-
-    return ShortenResponse(
-        short_code = code,
-        short_url = f"{BASE_URL}/api/{code}",
-        original_url = original_url
-    )
+    body: ShortenRequest,
+    current_user: User = Depends(get_current_user),
+    service: UrlShortenerService = Depends(get_shortener_service),
+) -> URLResponse:
+    url = service.shorten(user_id=current_user.id, original_url=str(body.url), tag_names=body.tags)
+    return to_url_response(url)
 
 @router.get(
     "/{code}",
@@ -109,7 +122,7 @@ def redirect_to_url(
     code: str,
     service: UrlShortenerService = Depends(get_shortener_service)
 ) -> RedirectResponse:
-    original_url = service.get_original_url(code)
+    original_url = service.open(code)
     if original_url is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
     return RedirectResponse(url=original_url, status_code=status.HTTP_302_FOUND)

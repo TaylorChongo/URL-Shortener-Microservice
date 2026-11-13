@@ -1,6 +1,9 @@
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
+
+TagName = Annotated[str, Field(min_length=1, max_length=50)]
 
 
 class ShortenRequest(BaseModel):
@@ -8,15 +11,24 @@ class ShortenRequest(BaseModel):
         description="The long URL to shorten. Must start with http:// or https://",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
+    tags: list[TagName] = Field(
+        default=[],
+        max_length=10,
+        description="Optional labels for this link (up to 10)",
+        examples=[["shopping", "books"]],
+    )
 
 
-class ShortenResponse(BaseModel):
+class URLResponse(BaseModel):
+    id: int = Field(examples=[1])
     short_code: str = Field(description="The unique 6-character code", examples=["aB3xY9"])
     short_url: str = Field(description="The full short link to share", examples=["http://127.0.0.1:8000/api/aB3xY9"])
     original_url: str = Field(
         description="The long URL that was shortened",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
+    tags: list[str] = Field(examples=[["shopping", "books"]])
+    created_at: datetime
 
 
 class UserCreate(BaseModel):
