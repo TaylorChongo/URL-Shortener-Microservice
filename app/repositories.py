@@ -93,8 +93,9 @@ class URLRepository:
         self.db.delete(url)
         self.db.commit()
 
-    def add_click(self, url: URL) -> None:
-        self.db.add(Click(url_id=url.id))
+    def add_click(self, url: URL, ip_address: str, user_agent: str, referrer: str | None) -> None:
+        click = Click(url_id=url.id, ip_address=ip_address, user_agent=user_agent, referrer=referrer)
+        self.db.add(click)
         self.db.commit()
 
     def click_counts(self, url_ids: list[int]) -> dict[int, int]:

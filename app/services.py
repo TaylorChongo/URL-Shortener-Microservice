@@ -27,10 +27,10 @@ class UrlShortenerService:
         tags = self.tags.get_or_create(tag_names)
         return self.urls.create(user_id=user_id, short_code=code, original_url=original_url, tags=tags)
 
-    def open(self, short_code: str) -> str | None:
+    def open(self, short_code: str, ip_address: str, user_agent: str, referrer: str | None) -> str | None:
         url = self.urls.get_by_code(short_code)
         if url is None:
             return None
 
-        self.urls.add_click(url)
+        self.urls.add_click(url, ip_address=ip_address, user_agent=user_agent, referrer=referrer)
         return url.original_url

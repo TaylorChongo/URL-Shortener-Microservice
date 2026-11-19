@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
 
@@ -132,9 +132,19 @@ def create_short_url(
 )
 def redirect_to_url(
     code: str,
+    request: Request,
     service: UrlShortenerService = Depends(get_shortener_service)
 ) -> RedirectResponse:
-    original_url = service.open(code)
+    ip_address = "0.0.0.0"
+    if request.client is not None:
+        ip_address = request.client.host
+
+    original_url = service.open(
+        code,
+        ip_address=ip_address,
+        user_agent=request.headers.get("user-agent", ""),
+        referrer=request.headers.get("referer"),
+    )
     if original_url is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
     return RedirectResponse(url=original_url, status_code=status.HTTP_302_FOUND)

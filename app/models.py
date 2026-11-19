@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, String, Table, Text, false, func, true
+from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -47,7 +48,7 @@ class URL(Base):
     favicon: Mapped[str | None] = mapped_column(String(2048))
     is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # stored number of visits, so reading it needs no counting (reviewer's suggestion)
+    # stored number of visits, so reading it needs no counting
     click_count: Mapped[int] = mapped_column(default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
@@ -65,6 +66,12 @@ class Click(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     url_id: Mapped[int] = mapped_column(ForeignKey("urls.id", ondelete="CASCADE"))
     clicked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # INET is Postgres's own IP address type: it stores IPv4 and IPv6 and rejects invalid addresses
+    ip_address: Mapped[str] = mapped_column(INET)
+    user_agent: Mapped[str] = mapped_column(Text)
+    referrer: Mapped[str | None] = mapped_column(Text)
+    city: Mapped[str | None] = mapped_column(String(100))
+    country: Mapped[str | None] = mapped_column(String(100))
 
     url: Mapped["URL"] = relationship(back_populates="clicks")
 
