@@ -11,6 +11,8 @@ services:
       WATCHFILES_FORCE_POLLING: "true"
     volumes:
       - ./app:/app/app
+      - ./alembic:/app/alembic      # new migration files written in the container appear in the project
+      - ./alembic.ini:/app/alembic.ini
     depends_on:
       db:
         condition: service_healthy
