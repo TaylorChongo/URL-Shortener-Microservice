@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, String, Table, Text, false, func
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, String, Table, Text, false, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -32,11 +32,23 @@ class User(Base):
 class URL(Base):
     __tablename__ = "urls"
     # "my links, newest first": filter by user_id, then read ids in order (no extra sort)
-    __table_args__ = (Index("ix_urls_user_id_id", "user_id", "id"),)
+    __table_args__ = (
+        Index("ix_urls_user_id_id", "user_id", "id"),
+        # the stored counter can never go below zero (like Django's PositiveIntegerField)
+        CheckConstraint("click_count >= 0", name="ck_urls_click_count_not_negative"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     short_code: Mapped[str] = mapped_column(String(10), unique=True, index=True)
+    custom_alias: Mapped[str | None] = mapped_column(String(10), unique=True, index=True)
     original_url: Mapped[str] = mapped_column(Text)
+    title: Mapped[str | None] = mapped_column(String(255))
+    description: Mapped[str | None] = mapped_column(String(500))
+    favicon: Mapped[str | None] = mapped_column(String(2048))
+    is_active: Mapped[bool] = mapped_column(default=True, server_default=true())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # stored number of visits, so reading it needs no counting (reviewer's suggestion)
+    click_count: Mapped[int] = mapped_column(default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
