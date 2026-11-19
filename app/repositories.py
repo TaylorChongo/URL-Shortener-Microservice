@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import URL, Click, Tag, User, url_tags
@@ -50,17 +50,22 @@ class URLRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
-    def code_exists(self, short_code: str) -> bool:
-        return self.db.scalar(select(URL.id).where(URL.short_code == short_code)) is not None
+    def code_exists(self, code: str) -> bool:
+        # a code is taken if it is used as a short code OR as a custom alias
+        statement = select(URL.id).where(or_(URL.short_code == code, URL.custom_alias == code))
+        return self.db.scalar(statement) is not None
 
-    def create(self, user_id: int, short_code: str, original_url: str, tags: list[Tag]) -> URL:
-        url = URL(user_id=user_id, short_code=short_code, original_url=original_url, tags=tags)
+    def create(self, user_id: int, short_code: str, original_url: str, tags: list[Tag], details: dict) -> URL:
+        # details holds the optional fields: custom_alias, title, description, favicon, expires_at
+        url = URL(user_id=user_id, short_code=short_code, original_url=original_url, tags=tags, **details)
         self.db.add(url)
         self.db.commit()
         return url
 
-    def get_by_code(self, short_code: str) -> URL | None:
-        return self.db.scalar(select(URL).where(URL.short_code == short_code))
+    def get_by_code(self, code: str) -> URL | None:
+        # a link opens with its short code or with its custom alias (both have a unique index)
+        statement = select(URL).where(or_(URL.short_code == code, URL.custom_alias == code))
+        return self.db.scalar(statement)
 
     def get_for_user(self, user_id: int, url_id: int) -> URL | None:
         statement = (
@@ -81,9 +86,10 @@ class URLRepository:
         )
         return list(self.db.scalars(statement))
 
-    def update(self, url: URL, original_url: str | None, tags: list[Tag] | None) -> URL:
-        if original_url is not None:
-            url.original_url = original_url
+    def update(self, url: URL, changes: dict, tags: list[Tag] | None) -> URL:
+        # changes only holds the fields the user sent, e.g. {"title": "New", "expires_at": None}
+        for field_name, value in changes.items():
+            setattr(url, field_name, value)
         if tags is not None:
             url.tags = tags
         self.db.commit()

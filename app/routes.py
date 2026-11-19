@@ -1,3 +1,6 @@
+import ipaddress
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
 from sqlalchemy.exc import IntegrityError
@@ -26,7 +29,7 @@ from app.schemas import (
     ValidationErrorResponse,
 )
 from app.security import hash_password
-from app.services import UrlShortenerService
+from app.services import AliasTakenError, UrlShortenerService, alias_is_available
 
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
@@ -81,15 +84,41 @@ router = APIRouter(prefix="/api", tags=["shortener"])
 
 
 def to_url_response(url: URL) -> URLResponse:
+    alias_url = None
+    if url.custom_alias is not None:
+        alias_url = f"{BASE_URL}/api/{url.custom_alias}"
+
     return URLResponse(
         id=url.id,
         short_code=url.short_code,
         short_url=f"{BASE_URL}/api/{url.short_code}",
         original_url=url.original_url,
+        custom_alias=url.custom_alias,
+        alias_url=alias_url,
+        title=url.title,
+        description=url.description,
+        favicon=url.favicon,
         tags=[tag.name for tag in url.tags],
         click_count=url.click_count,
+        is_active=url.is_active,
+        expires_at=url.expires_at,
         created_at=url.created_at,
     )
+
+
+ALIAS_TAKEN = {409: {"model": ErrorResponse, "description": "This custom alias is already used"}}
+
+
+def visitor_ip(request: Request) -> str:
+    # the clicks.ip_address column only accepts real IP addresses,
+    # so anything else (missing, or a name like "testclient") is saved as 0.0.0.0
+    if request.client is None:
+        return "0.0.0.0"
+    try:
+        ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return "0.0.0.0"
+    return request.client.host
 
 
 @router.post(
@@ -98,12 +127,14 @@ def to_url_response(url: URL) -> URLResponse:
     status_code=status.HTTP_201_CREATED,
     summary="Create a short URL",
     description=(
-        "Login required. Send a long URL (and optional tags) and get back a unique "
-        "6-character short code and a ready-to-share short link. The link belongs to you."
+        "Login required. Send a long URL and get back a unique 6-character short code and a "
+        "ready-to-share short link. Optional: tags, a custom alias, a title, a description, a favicon "
+        "and an expiry date. The link belongs to you."
     ),
     responses={
         401: {"model": ErrorResponse, "description": "You are not logged in"},
-        422: {"model": ValidationErrorResponse, "description": "The URL or tags are not valid"},
+        **ALIAS_TAKEN,
+        422: {"model": ValidationErrorResponse, "description": "One of the fields is not valid"},
     },
 )
 def create_short_url(
@@ -111,7 +142,14 @@ def create_short_url(
     current_user: User = Depends(get_current_user),
     service: UrlShortenerService = Depends(get_shortener_service),
 ) -> URLResponse:
-    url = service.shorten(user_id=current_user.id, original_url=str(body.url), tag_names=body.tags)
+    details = body.model_dump(include={"custom_alias", "title", "description", "favicon", "expires_at"})
+    try:
+        url = service.shorten(
+            user_id=current_user.id, original_url=str(body.url), tag_names=body.tags, details=details
+        )
+    except (AliasTakenError, IntegrityError):
+        # IntegrityError: someone took the same alias at the same moment (the unique index refused it)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
     return to_url_response(url)
 
 @router.get(
@@ -120,13 +158,14 @@ def create_short_url(
     status_code=status.HTTP_302_FOUND,
     summary="Redirect to the original URL",
     description=(
-        "Looks up the short code and redirects to the original URL. "
+        "Looks up the short code (or custom alias), records the visit and redirects to the original URL. "
         "Open the short link in your browser's address bar to test it: "
         "Swagger's 'Try it out' cannot follow redirects to other websites."
     ),
     responses={
         302: {"description": "Redirects to the original URL"},
         404: {"model": ErrorResponse, "description": "No URL was found for this short code"},
+        410: {"model": ErrorResponse, "description": "The link was switched off or has expired"},
         422: {"model": ValidationErrorResponse, "description": "The short code is not valid"},
     },
 )
@@ -135,19 +174,21 @@ def redirect_to_url(
     request: Request,
     service: UrlShortenerService = Depends(get_shortener_service)
 ) -> RedirectResponse:
-    ip_address = "0.0.0.0"
-    if request.client is not None:
-        ip_address = request.client.host
+    url = service.find(code)
+    if url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
+    if not url.is_active:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has been switched off")
+    if url.expires_at is not None and url.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has expired")
 
-    original_url = service.open(
-        code,
-        ip_address=ip_address,
+    service.record_visit(
+        url,
+        ip_address=visitor_ip(request),
         user_agent=request.headers.get("user-agent", ""),
         referrer=request.headers.get("referer"),
     )
-    if original_url is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
-    return RedirectResponse(url=original_url, status_code=status.HTTP_302_FOUND)
+    return RedirectResponse(url=url.original_url, status_code=status.HTTP_302_FOUND)
     
 
 urls_router = APIRouter(prefix="/api/urls", tags=["urls"])
@@ -227,8 +268,12 @@ def get_url(
     "/{url_id}",
     response_model=URLResponse,
     summary="Update one of your URLs",
-    description="Login required. Send only what you want to change: the long URL, the tags, or both.",
-    responses={**NOT_LOGGED_IN, **NOT_FOUND},
+    description=(
+        "Login required. Send only what you want to change. Leave a field out to keep it. "
+        "Send null to clear an optional field (custom_alias, title, description, favicon, expires_at). "
+        "Send is_active false to switch the link off."
+    ),
+    responses={**NOT_LOGGED_IN, **NOT_FOUND, **ALIAS_TAKEN},
 )
 def update_url(
     url_id: int,
@@ -239,15 +284,23 @@ def update_url(
 ) -> URLResponse:
     url = get_own_url_or_404(urls, current_user, url_id)
 
-    new_original_url = None
-    if body.url is not None:
-        new_original_url = str(body.url)
+    # only the fields the user actually sent (exclude_unset), e.g. {"title": "New", "expires_at": None}
+    changes = body.model_dump(exclude_unset=True, exclude={"url", "tags"})
+    if "url" in body.model_fields_set:
+        changes["original_url"] = str(body.url)
+
+    new_alias = changes.get("custom_alias")
+    if new_alias is not None and new_alias != url.custom_alias and not alias_is_available(urls, new_alias):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
 
     new_tags = None
-    if body.tags is not None:
+    if "tags" in body.model_fields_set:
         new_tags = tags.get_or_create(body.tags)
 
-    url = urls.update(url, original_url=new_original_url, tags=new_tags)
+    try:
+        url = urls.update(url, changes=changes, tags=new_tags)
+    except IntegrityError:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
     return to_url_response(url)
 
 

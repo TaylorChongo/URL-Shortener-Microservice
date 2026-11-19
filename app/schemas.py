@@ -1,9 +1,11 @@
 from datetime import date, datetime
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, FutureDatetime, HttpUrl
 
 TagName = Annotated[str, Field(min_length=1, max_length=50)]
+# 3 to 10 characters: letters, digits, "-" and "_" only (it becomes part of a web address)
+CustomAlias = Annotated[str, Field(min_length=3, max_length=10, pattern=r"^[A-Za-z0-9_-]+$")]
 
 
 class ShortenRequest(BaseModel):
@@ -17,20 +19,37 @@ class ShortenRequest(BaseModel):
         description="Optional labels for this link (up to 10)",
         examples=[["shopping", "books"]],
     )
+    custom_alias: CustomAlias | None = Field(
+        default=None,
+        description="Optional name for the link, e.g. 'my-cv' opens at /api/my-cv (3-10 letters, digits, - or _)",
+        examples=["my-cv"],
+    )
+    title: str | None = Field(default=None, max_length=255, examples=["Python Crash Course"])
+    description: str | None = Field(default=None, max_length=500, examples=["The book I recommend to beginners"])
+    favicon: str | None = Field(default=None, max_length=2048, description="Address of the site's small icon")
+    expires_at: FutureDatetime | None = Field(
+        default=None,
+        description="When the link stops working (must be in the future). Leave it out for a link that never expires.",
+    )
 
 
 class URLUpdate(BaseModel):
-    url: HttpUrl | None = Field(
-        default=None,
-        description="The new long URL. Leave it out to keep the current one.",
-        examples=["https://www.python.org"],
-    )
-    tags: list[TagName] | None = Field(
+    # Leave a field out to keep its current value.
+    # For optional fields (alias, title, description, favicon, expires_at), send null to clear them.
+    # url, tags and is_active cannot be null, so their default is None only to mean "not sent".
+    url: HttpUrl = Field(default=None, description="The new long URL", examples=["https://www.python.org"])
+    tags: list[TagName] = Field(
         default=None,
         max_length=10,
-        description="The new list of tags (replaces the old ones). Leave it out to keep the current tags, send [] to remove all.",
+        description="The new list of tags (replaces the old ones). Send [] to remove all.",
         examples=[["learning"]],
     )
+    is_active: bool = Field(default=None, description="false switches the link off (it answers 410)", examples=[False])
+    custom_alias: CustomAlias | None = Field(default=None, examples=["my-cv"])
+    title: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=500)
+    favicon: str | None = Field(default=None, max_length=2048)
+    expires_at: FutureDatetime | None = Field(default=None, description="Send null to remove the expiry date")
 
 
 class URLResponse(BaseModel):
@@ -41,8 +60,15 @@ class URLResponse(BaseModel):
         description="The long URL that was shortened",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
+    custom_alias: str | None = Field(examples=["my-cv"])
+    alias_url: str | None = Field(description="The short link using the alias", examples=["http://127.0.0.1:8000/api/my-cv"])
+    title: str | None
+    description: str | None
+    favicon: str | None
     tags: list[str] = Field(examples=[["shopping", "books"]])
     click_count: int = Field(description="How many times the short link was opened", examples=[12])
+    is_active: bool = Field(examples=[True])
+    expires_at: datetime | None
     created_at: datetime
 
 
