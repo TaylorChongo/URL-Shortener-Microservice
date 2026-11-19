@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import URL, Click, Tag, User, url_tags
@@ -96,36 +96,24 @@ class URLRepository:
     def add_click(self, url: URL, ip_address: str, user_agent: str, referrer: str | None) -> None:
         click = Click(url_id=url.id, ip_address=ip_address, user_agent=user_agent, referrer=referrer)
         self.db.add(click)
+        # +1 is done by Postgres ("current value + 1"), so two visits at the same moment are both counted
+        self.db.execute(update(URL).where(URL.id == url.id).values(click_count=URL.click_count + 1))
+        # one commit: the visit row and the counter are saved together
         self.db.commit()
-
-    def click_counts(self, url_ids: list[int]) -> dict[int, int]:
-        if not url_ids:
-            return {}
-        statement = (
-            select(Click.url_id, func.count(Click.id))
-            .where(Click.url_id.in_(url_ids))
-            .group_by(Click.url_id)
-        )
-        counts = {}
-        for url_id, count in self.db.execute(statement):
-            counts[url_id] = count
-        return counts
 
     def count_urls(self, user_id: int) -> int:
         return self.db.scalar(select(func.count(URL.id)).where(URL.user_id == user_id))
 
     def count_clicks(self, user_id: int) -> int:
-        statement = select(func.count(Click.id)).join(Click.url).where(URL.user_id == user_id)
+        # add up the stored counters; coalesce turns "no links" (NULL) into 0
+        statement = select(func.coalesce(func.sum(URL.click_count), 0)).where(URL.user_id == user_id)
         return self.db.scalar(statement)
 
     def top_urls(self, user_id: int, limit: int) -> list:
-        click_count = func.count(Click.id).label("clicks")
         statement = (
-            select(URL.short_code, URL.original_url, click_count)
-            .outerjoin(URL.clicks)
+            select(URL.short_code, URL.original_url, URL.click_count.label("clicks"))
             .where(URL.user_id == user_id)
-            .group_by(URL.id)
-            .order_by(click_count.desc(), URL.id.desc())
+            .order_by(URL.click_count.desc(), URL.id.desc())
             .limit(limit)
         )
         return list(self.db.execute(statement))

@@ -80,14 +80,14 @@ def login(current_user: User = Depends(get_current_user)) -> UserRead:
 router = APIRouter(prefix="/api", tags=["shortener"])
 
 
-def to_url_response(url: URL, click_count: int) -> URLResponse:
+def to_url_response(url: URL) -> URLResponse:
     return URLResponse(
         id=url.id,
         short_code=url.short_code,
         short_url=f"{BASE_URL}/api/{url.short_code}",
         original_url=url.original_url,
         tags=[tag.name for tag in url.tags],
-        click_count=click_count,
+        click_count=url.click_count,
         created_at=url.created_at,
     )
 
@@ -112,7 +112,7 @@ def create_short_url(
     service: UrlShortenerService = Depends(get_shortener_service),
 ) -> URLResponse:
     url = service.shorten(user_id=current_user.id, original_url=str(body.url), tag_names=body.tags)
-    return to_url_response(url, click_count=0)
+    return to_url_response(url)
 
 @router.get(
     "/{code}",
@@ -177,8 +177,7 @@ def list_urls(
     urls: URLRepository = Depends(get_url_repository),
 ) -> list[URLResponse]:
     page = urls.list_for_user(user_id=current_user.id, limit=limit, offset=offset)
-    counts = urls.click_counts([url.id for url in page])
-    return [to_url_response(url, click_count=counts.get(url.id, 0)) for url in page]
+    return [to_url_response(url) for url in page]
 
 
 @urls_router.get(
@@ -221,8 +220,7 @@ def get_url(
     urls: URLRepository = Depends(get_url_repository),
 ) -> URLResponse:
     url = get_own_url_or_404(urls, current_user, url_id)
-    counts = urls.click_counts([url.id])
-    return to_url_response(url, click_count=counts.get(url.id, 0))
+    return to_url_response(url)
 
 
 @urls_router.patch(
@@ -250,8 +248,7 @@ def update_url(
         new_tags = tags.get_or_create(body.tags)
 
     url = urls.update(url, original_url=new_original_url, tags=new_tags)
-    counts = urls.click_counts([url.id])
-    return to_url_response(url, click_count=counts.get(url.id, 0))
+    return to_url_response(url)
 
 
 @urls_router.delete(
