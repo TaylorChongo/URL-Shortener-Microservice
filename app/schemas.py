@@ -81,6 +81,8 @@ class UserRead(BaseModel):
     id: int = Field(examples=[1])
     email: str = Field(examples=["ama@mail.com"])
     is_active: bool = Field(examples=[True])
+    is_premium: bool = Field(examples=[False])
+    tier: str = Field(description="Account level: free, premium or admin", examples=["free"])
     created_at: datetime
 
 

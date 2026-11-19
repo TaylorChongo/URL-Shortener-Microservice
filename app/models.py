@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Index, String, Table, Text, func
+from sqlalchemy import CheckConstraint, Column, DateTime, ForeignKey, Index, String, Table, Text, false, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -15,11 +15,15 @@ url_tags = Table(
 
 class User(Base):
     __tablename__ = "users"
+    # tier can only be one of these three values (like Django's "choices")
+    __table_args__ = (CheckConstraint("tier IN ('free', 'premium', 'admin')", name="ck_users_tier"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(default=True)
+    is_premium: Mapped[bool] = mapped_column(default=False, server_default=false())
+    tier: Mapped[str] = mapped_column(String(20), default="free", server_default="free")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     urls: Mapped[list["URL"]] = relationship(back_populates="owner", passive_deletes=True)
