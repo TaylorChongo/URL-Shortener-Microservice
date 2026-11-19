@@ -1,14 +1,14 @@
 # URL Shortener Microservice
 
-A REST API that turns long URLs into short codes and redirects short codes back to the original URL. Each user has an account and manages **only their own** links: list, view, update, delete, tag them, and see click statistics.
+A REST API that turns long URLs into short codes and redirects short codes back to the original URL. Each user has an account and manages **only their own** links: list, view, update, delete, tag them, give them a custom alias or an expiry date, switch them off, and see click statistics. Every visit is recorded with the visitor's IP address, browser and referrer.
 
 It is built with **FastAPI**, stores data in **PostgreSQL** through the **SQLAlchemy 2.x ORM**, manages the schema with **Alembic** migrations, and runs with **Docker Compose**. Interactive **Swagger** documentation is generated automatically.
 
 ```
-POST /auth/register   {"email": "ama@mail.com", "password": "secret123"}           → 201
-POST /api/shorten     {"url": "https://www.python.org", "tags": ["learning"]}     → 201  {"short_code": "aB3xY9", ...}
-GET  /api/aB3xY9                                                                  → 302  redirect (click recorded)
-GET  /api/urls/stats                                                              → 200  totals, top links, clicks per day
+POST /auth/register   {"email": "ama@mail.com", "password": "secret123"}                          → 201
+POST /api/shorten     {"url": "https://www.python.org", "custom_alias": "my-cv", "tags": ["cv"]}  → 201  {"short_code": "aB3xY9", ...}
+GET  /api/aB3xY9      (or /api/my-cv)                                                            → 302  redirect, visit recorded
+GET  /api/urls/stats                                                                             → 200  totals, top links, clicks per day
 ```
 
 ---
@@ -61,7 +61,9 @@ The lab is written for Flask. This project uses FastAPI, and every Flask require
 | Flask-SQLAlchemy | SQLAlchemy 2.x directly (engine, session per request) | [app/database.py](app/database.py) |
 | Flask-Migrate | Alembic (which Flask-Migrate wraps) | [alembic/](alembic/) |
 | Django model managers | Repository classes, one per model | [app/repositories.py](app/repositories.py) |
-| Django custom user model | `User` SQLAlchemy model, created before the first migration | [app/models.py](app/models.py) |
+| Django custom user model (`AbstractUser`) | `User` SQLAlchemy model, created before the first migration | [app/models.py](app/models.py) |
+| Django field `choices` / `PositiveIntegerField` | `CHECK` constraints enforced by PostgreSQL | [app/models.py](app/models.py) |
+| Django `GenericIPAddressField` | PostgreSQL's native `INET` type | [app/models.py](app/models.py) |
 | Global exception handler | `app.add_exception_handler(...)` | [app/errors.py](app/errors.py) |
 | Request logging middleware | `BaseHTTPMiddleware` | [app/middleware.py](app/middleware.py) |
 | WSGI server (Gunicorn) | Gunicorn managing ASGI Uvicorn workers | [Dockerfile](Dockerfile) |
@@ -91,7 +93,7 @@ The lab is written for Flask. This project uses FastAPI, and every Flask require
                                  │  Depends(get_current_user)   ← HTTP Basic: email + password
                                  │  Depends(get_url_repository) ← one DB session per request
                                  ▼
-          UrlShortenerService (code generation)   /   Repositories (all ORM queries)
+     UrlShortenerService (codes, aliases, visits)   /   Repositories (all ORM queries)
                                  │
                                  ▼
                      SQLAlchemy Session → PostgreSQL
@@ -104,7 +106,7 @@ The lab is written for Flask. This project uses FastAPI, and every Flask require
 | App factory | `main.py` | Builds the app and plugs in routers, middleware and error handlers |
 | Routes | `routes.py` | HTTP only: read the request, call a repository or service, return the response |
 | Schemas | `schemas.py` | The shape of requests, responses and errors (and their Swagger examples) |
-| Service | `services.py` | Business logic: create a unique 6-character code, record clicks on redirect |
+| Service | `services.py` | Business logic: unique 6-character codes, custom alias checks, recording visits |
 | Repositories | `repositories.py` | **Every database query**, one class per model (the "managers") |
 | Models | `models.py` | Tables, columns, constraints, indexes and relationships |
 | Database | `database.py` | Engine (connection pool), session factory, `Base`, `get_db()` |
@@ -119,7 +121,8 @@ Routes never write queries. They ask a repository, so every query lives in one p
 ```
 docker-compose.yml
  ├── api  (built from Dockerfile)    port 8000 → your PC
- │     └── connects to postgresql://db:5432
+ │     ├── connects to postgresql://db:5432
+ │     └── development: ./app, ./alembic and alembic.ini are shared with the container
  └── db   (postgres:18-alpine)       port 5433 → your PC (development only, hidden in production)
        └── named volume "postgres-data"   data survives restarts
 ```
@@ -144,13 +147,22 @@ erDiagram
         varchar email UK "max 255, unique index"
         varchar hashed_password "bcrypt hash, max 255"
         boolean is_active "default true"
+        boolean is_premium "default false"
+        varchar tier "free | premium | admin (CHECK), default free"
         timestamptz created_at "default now()"
     }
 
     urls {
         int id PK
         varchar short_code UK "max 10, unique index"
+        varchar custom_alias UK "max 10, nullable, unique index"
         text original_url
+        varchar title "max 255, nullable"
+        varchar description "max 500, nullable"
+        varchar favicon "max 2048, nullable"
+        boolean is_active "default true"
+        timestamptz expires_at "nullable"
+        int click_count "stored counter, default 0, CHECK >= 0"
         timestamptz created_at "default now()"
         int user_id FK "users.id, on delete cascade"
     }
@@ -159,6 +171,11 @@ erDiagram
         int id PK
         int url_id FK "urls.id, on delete cascade"
         timestamptz clicked_at "default now()"
+        inet ip_address "IPv4 or IPv6"
+        text user_agent "browser or app"
+        text referrer "nullable"
+        varchar city "max 100, nullable"
+        varchar country "max 100, nullable"
     }
 
     tags {
@@ -178,29 +195,38 @@ How to read it:
 - `PK` primary key · `FK` foreign key · `UK` unique.
 - Composite indexes, which the diagram can't show: `urls (user_id, id)` and `clicks (url_id, clicked_at)`. See [Indexes](#indexes-and-how-they-were-checked).
 
-| Table | Columns | Constraints and indexes |
-|---|---|---|
-| `users` | `id`, `email`, `hashed_password`, `is_active`, `created_at` | PK `id` · **unique index** `ix_users_email` |
-| `urls` | `id`, `short_code`, `original_url`, `created_at`, `user_id` | PK `id` · **unique index** `ix_urls_short_code` · FK `user_id → users.id ON DELETE CASCADE` · **composite index** `ix_urls_user_id_id (user_id, id)` |
-| `clicks` | `id`, `url_id`, `clicked_at` | PK `id` · FK `url_id → urls.id ON DELETE CASCADE` · **composite index** `ix_clicks_url_id_clicked_at (url_id, clicked_at)` |
-| `tags` | `id`, `name` | PK `id` · **unique index** `ix_tags_name` |
-| `url_tags` | `url_id`, `tag_id` | **Composite PK** `(url_id, tag_id)` (a tag can't be added twice to a link) · FKs to both sides `ON DELETE CASCADE` · index `ix_url_tags_tag_id` |
+| Table | Constraints and indexes |
+|---|---|
+| `users` | PK `id` · **unique index** `ix_users_email` · **CHECK** `ck_users_tier` (`tier IN ('free', 'premium', 'admin')`) |
+| `urls` | PK `id` · **unique indexes** `ix_urls_short_code`, `ix_urls_custom_alias` · FK `user_id → users.id ON DELETE CASCADE` · **composite index** `ix_urls_user_id_id (user_id, id)` · **CHECK** `ck_urls_click_count_not_negative` (`click_count >= 0`) |
+| `clicks` | PK `id` · FK `url_id → urls.id ON DELETE CASCADE` · **composite index** `ix_clicks_url_id_clicked_at (url_id, clicked_at)` · `ip_address` uses PostgreSQL's `INET` type, which rejects anything that isn't an IP address |
+| `tags` | PK `id` · **unique index** `ix_tags_name` |
+| `url_tags` | **Composite PK** `(url_id, tag_id)` (a tag can't be added twice to a link) · FKs to both sides `ON DELETE CASCADE` · index `ix_url_tags_tag_id` |
 
-- **Custom user model.** FastAPI has no built-in user, so `User` is our own model. It was written **before the first migration**, so `urls.user_id` could reference it from the start (the same reason Django recommends a custom user model before `migrate`).
-- **Database-side defaults.** `created_at` and `clicked_at` use `server_default=now()`, so every row uses the database clock.
-- **Rules live in the database**, not only in Python: `NOT NULL`, `UNIQUE`, foreign keys and `CASCADE` are enforced by PostgreSQL. For example, two people registering the same email at the same moment can't both succeed: the unique index rejects the second insert, and the API answers `409`.
+- **Custom user model.** FastAPI has no built-in user, so `User` is our own model (the equivalent of a Django custom user extending `AbstractUser`). It was written **before the first migration**, so `urls.user_id` could reference it from the start. Of `AbstractUser`'s fields, it keeps what the app needs: `email`, `is_active`, `created_at` (≈ `date_joined`), plus `is_premium` and `tier`.
+- **Database-side defaults.** `created_at`, `clicked_at`, `is_active`, `is_premium`, `tier` and `click_count` use `server_default`, so the rule lives in the table itself and also applies to rows inserted outside the app.
+- **Rules live in the database**, not only in Python: `NOT NULL`, `UNIQUE`, foreign keys, `CASCADE`, `CHECK` and the `INET` type are enforced by PostgreSQL. For example, two people registering the same email at the same moment can't both succeed, and `tier = 'gold'` is refused even when typed directly in pgAdmin.
 - **Relationships** (`user.urls`, `url.owner`, `url.clicks`, `url.tags`, `tag.urls`) use `back_populates`, so both sides stay in sync. `passive_deletes=True` lets PostgreSQL's `ON DELETE CASCADE` remove children instead of the ORM loading and deleting them one by one.
 
 ### Migrations (Alembic)
 
-| # | Revision | What it does |
-|---|---|---|
-| 1 | `e6e9665c32e0` | Create `users` and its unique email index |
-| 2 | `2f758049b7ce` | Create `urls` with the foreign key to `users` and its indexes |
-| 3 | `d258882cd189` | Create `clicks`, `tags` and the `url_tags` linking table |
-| 4 | `ed410620164d` | Replace two single-column indexes with composite ones that match the real queries (see below) |
+| # | Revision | What it does | Adjusted by hand |
+|---|---|---|---|
+| 1 | `e6e9665c32e0` | Create `users` and its unique email index | – |
+| 2 | `2f758049b7ce` | Create `urls` with the foreign key to `users` and its indexes | – |
+| 3 | `d258882cd189` | Create `clicks`, `tags` and the `url_tags` linking table | – |
+| 4 | `ed410620164d` | Replace two single-column indexes with composite ones that match the real queries (see below) | – |
+| 5 | `b2489dff4602` | Add `is_premium` and `tier` to `users` | added the `tier` CHECK constraint |
+| 6 | `0c6a9ac83683` | Add `custom_alias`, `title`, `description`, `favicon`, `is_active`, `expires_at` and `click_count` to `urls` | added the `click_count >= 0` CHECK, and a **data step** that fills `click_count` from the clicks already recorded |
+| 7 | `6c4844556bc0` | Add `ip_address`, `user_agent`, `referrer`, `city`, `country` to `clicks` | required columns on a table with existing rows: added **temporary defaults** (`0.0.0.0`, empty) for old rows, then removed them so new clicks must provide real values |
 
-Each migration was autogenerated from the models, **reviewed**, then applied. Every migration has a working `downgrade()`. Migration 4 was tested by running `upgrade → downgrade → upgrade`.
+Each migration was autogenerated from the models, **reviewed**, corrected where needed, then applied. Autogenerate doesn't detect `CHECK` constraints or data changes, which is why migrations 5–7 needed manual additions. Every migration has a working `downgrade()`, and migrations 4–7 were tested by running `upgrade → downgrade → upgrade`.
+
+The data step in migration 6 is written with SQLAlchemy Core, not raw SQL:
+```python
+number_of_clicks = select(func.count()).select_from(clicks).where(clicks.c.url_id == urls.c.id).scalar_subquery()
+op.execute(urls.update().values(click_count=number_of_clicks))
+```
 
 `alembic/env.py` reads the database URL from the environment (never from `alembic.ini`, which is committed) and uses `Base.metadata` as the target for autogenerate.
 
@@ -212,30 +238,48 @@ FastAPI has no equivalent of Django's `Model.objects` manager, so each model get
 |---|---|
 | `UserRepository` | `get_by_email`, `get_by_id`, `create` |
 | `TagRepository` | `get_or_create(names)`: cleans names, then finds the existing ones in **one** `IN (...)` query and creates the rest |
-| `URLRepository` | `code_exists`, `create`, `get_by_code`, `get_for_user`, `list_for_user`, `update`, `delete`, `add_click`, `click_counts`, plus the stats queries |
+| `URLRepository` | `code_exists` (short code **or** alias), `create`, `get_by_code` (short code **or** alias), `get_for_user`, `list_for_user`, `update` (only the fields sent), `delete`, `add_click`, plus the stats queries |
 
-**Ownership is part of every query.** `get_for_user` filters on **both** `URL.id` and `URL.user_id`. Another user's link is simply "not found" (`404`), so the API never reveals that it exists.
+**Ownership is part of every query.** `get_for_user` filters on **both** `URL.id` and `URL.user_id`. Another user's link is simply "not found" (`404`), so the API never reveals that it exists. The owner is always taken from the login, never from the request body.
+
+### Stored click counter (from code review)
+
+At first, a link's click count was **computed** by counting its rows in `clicks` each time it was shown. A reviewer pointed out that reading a count this way gets slower as visits grow, and suggested storing the count on the link itself. `urls.click_count` now does that (a deliberate **denormalization**):
+
+| | Counting rows (before) | Stored counter (now) |
+|---|---|---|
+| Reading a link's clicks | `COUNT(*)` over its rows in `clicks` | read one column |
+| Each visit | 1 insert into `clicks` | 1 insert into `clicks` + `UPDATE urls SET click_count = click_count + 1` |
+
+How it stays correct:
+- The **+1 is done by PostgreSQL** (`URL.click_count + 1`), not by reading the value in Python and writing it back, so simultaneous visits are all counted. Tested with **20 parallel requests**: counter and click rows both went up by exactly 20.
+- The click row and the counter update are saved in **one commit**, so they can't drift apart.
+- `CHECK (click_count >= 0)` guards against bad writes.
+- Migration 6 filled the counter for existing links from their recorded clicks.
+
+The `clicks` table is kept: it holds *when* and *from where* (IP, browser, referrer), which the per-day statistics need.
 
 ### Query optimization
 
-**No N+1 queries.** Listing links with their tags and click counts uses a **constant number of queries**, whatever the page size:
+**No N+1 queries.** Listing links with their tags uses a **constant number of queries**, whatever the page size:
 
 | Route | Queries | How |
 |---|---|---|
-| `GET /api/urls` | 3 | the page of links · `selectinload(URL.tags)` loads all their tags in one query · one `COUNT ... GROUP BY url_id` for all their click counts |
-| `GET /api/urls/{id}` | 3 | same, for one link |
+| `GET /api/urls` | 2 | the page of links (with their stored `click_count`) · `selectinload(URL.tags)` loads all their tags in one query |
+| `GET /api/urls/{id}` | 2 | same, for one link |
 | `GET /api/urls/stats` | 5 | one aggregate query per figure |
 
-These counts exclude the login check. Measured with SQLAlchemy's `before_cursor_execute` event: without `selectinload`, the same list made `1 + N` queries (measured: 4 queries for 3 links, so a 100-link page would need 101).
+These counts exclude the login check. Measured with SQLAlchemy's `before_cursor_execute` event. Without `selectinload`, the list made `1 + N` queries (measured: 4 queries for 3 links, so a 100-link page would need 101). Before the stored counter, the list needed a third query to count clicks.
 
 Other details:
 - `code_exists` selects only `URL.id`, not the whole row.
 - Saving a user is a single `INSERT ... RETURNING id, created_at`, with no extra reload query.
 - Pagination (`limit` 1–100, `offset`) keeps responses small.
+- Looking up a link by short code **or** alias uses the two unique indexes.
 
 ### Indexes, and how they were checked
 
-Indexes exist for the columns the app actually **searches by**: email at login, `short_code` on every redirect, owner on every list, `url_id` when counting clicks, and tag name.
+Indexes exist for the columns the app actually **searches by**: email at login, `short_code` and `custom_alias` on every redirect, owner on every list, `url_id` + date when counting clicks per day, and tag name.
 
 Migration 4 reshaped two of them to fit the real queries. They were measured with `EXPLAIN ANALYZE` on generated test data, comparing the old and new indexes:
 
@@ -251,12 +295,10 @@ A composite index still serves queries on its **first** column alone (like a pho
 | Figure | ORM query |
 |---|---|
 | `total_urls` | `func.count(URL.id)` filtered by owner |
-| `total_clicks` | `func.count(Click.id)` with a `join` to `URL`, filtered by owner |
-| `top_urls` | `outerjoin` clicks, `group_by(URL.id)`, `order_by(count desc)`, `limit(5)`. Links with 0 clicks are included. |
-| `clicks_last_7_days` | `group_by(func.date(Click.clicked_at))` over the last 7 days |
+| `total_clicks` | `func.sum(URL.click_count)` filtered by owner (`coalesce` → 0 when there are no links) |
+| `top_urls` | links ordered by the stored `click_count`, `limit(5)` |
+| `clicks_last_7_days` | `group_by(func.date(Click.clicked_at))` over the last 7 days, joined to the owner's links |
 | `urls_per_tag` | `join` through `url_tags`, `group_by(Tag.name)` |
-
-Per-link click counts are **computed** from the `clicks` table, not stored in a counter column. There is one source of truth, so a stored count can never disagree with the real clicks.
 
 ---
 
@@ -272,7 +314,7 @@ url-shortener-microservice/
 │   ├── models.py           # User, URL, Click, Tag, url_tags
 │   ├── repositories.py     # UserRepository, TagRepository, URLRepository
 │   ├── security.py         # hash_password, verify_password
-│   ├── services.py         # UrlShortenerService (codes, clicks)
+│   ├── services.py         # UrlShortenerService (codes, aliases, visits)
 │   ├── schemas.py          # Pydantic request / response / error models
 │   ├── dependencies.py     # get_db wiring, repositories, get_current_user
 │   ├── routes.py           # /auth, /api/urls, /api routes
@@ -280,7 +322,7 @@ url-shortener-microservice/
 │   └── middleware.py       # request logging middleware
 ├── alembic/
 │   ├── env.py              # reads DATABASE_URL, targets Base.metadata
-│   └── versions/           # the 4 migrations
+│   └── versions/           # the 7 migrations
 ├── alembic.ini
 ├── Dockerfile              # multi-stage production image (includes alembic)
 ├── docker-compose.yml      # development: app + PostgreSQL + hot reload
@@ -316,7 +358,7 @@ All settings come from environment variables. Locally they are read from a `.env
 |---|---|---|
 | Server | `fastapi dev`, auto-reload | Gunicorn + 4 Uvicorn workers (`WEB_CONCURRENCY`) |
 | `DEBUG` | `True` | `False` |
-| Code | mounted as a volume (hot reload) | baked into the image |
+| Code and migrations | shared with the container (hot reload, new migration files appear in the project) | baked into the image |
 | Database port on host | `5433` | not exposed |
 | Restart policy | none | `unless-stopped` |
 
@@ -327,7 +369,6 @@ All settings come from environment variables. Locally they are read from a `.env
 ### Prerequisites
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 - Git
-- Python 3.11+ (to run Alembic from your machine in development)
 
 ### 1. Clone and configure
 ```bash
@@ -345,22 +386,14 @@ docker compose ps
 Expected: `db` is `(healthy)` and `api` is `Up`.
 
 ### 3. Create the tables (run the migrations)
-From your machine:
-```bash
-python -m venv .venv
-.venv\Scripts\Activate.ps1        # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-alembic upgrade head
-```
-Or from inside the API container, without a local Python:
 ```bash
 docker compose exec api alembic upgrade head
 ```
 Expected last line:
 ```
-INFO  [alembic.runtime.migration] Running upgrade d258882cd189 -> ed410620164d, use composite indexes for url list and clicks
+INFO  [alembic.runtime.migration] Running upgrade 0c6a9ac83683 -> 6c4844556bc0, add visitor details to clicks
 ```
-Check with `alembic current`, which should print `ed410620164d (head)`.
+Check with `docker compose exec api alembic current`, which should print `6c4844556bc0 (head)`.
 
 - Swagger UI: http://127.0.0.1:8000/docs
 - Health check: http://127.0.0.1:8000/health → `{"status":"ok","env":"development"}`
@@ -382,13 +415,14 @@ docker compose exec db psql -U <POSTGRES_USER> -d <POSTGRES_DB> -c "\d urls"
 Or connect pgAdmin to host `127.0.0.1`, port **5433**.
 
 ### Migration commands
+Run Alembic inside the `api` container. In development, `./alembic` is shared with the container, so a migration file generated there appears in the project folder.
 ```bash
-alembic revision --autogenerate -m "describe the change"   # write a migration from model changes (then read it!)
-alembic upgrade head                                       # apply all pending migrations
-alembic downgrade -1                                       # roll back the last one
-alembic current                                            # which migration the database is on
+docker compose exec api alembic revision --autogenerate -m "describe the change"   # write a migration (then read it!)
+docker compose exec api alembic upgrade head                                       # apply all pending migrations
+docker compose exec api alembic downgrade -1                                       # roll back the last one
+docker compose exec api alembic current                                            # which migration the database is on
 ```
-On Windows, if `alembic` is blocked by an application-control policy, use `python -m alembic ...` instead.
+Alembic can also run from a local virtual environment (`pip install -r requirements.txt`, then `python -m alembic ...`). On the development machine, Windows application control blocked `alembic.exe` and one of SQLAlchemy's compiled modules, which is why the commands above run in Docker.
 
 ---
 
@@ -406,17 +440,27 @@ Basic auth sends credentials with every request, so it must be used over HTTPS o
 
 | Method and path | Auth | Success | Errors |
 |---|---|---|---|
-| `POST /auth/register` `{"email", "password"}` | – | **201** `{"id", "email", "is_active", "created_at"}` | **409** email already registered · **422** invalid email or password not 8–72 characters |
+| `POST /auth/register` `{"email", "password"}` | – | **201** `{"id", "email", "is_active", "is_premium", "tier", "created_at"}` | **409** email already registered · **422** invalid email or password not 8–72 characters |
 | `POST /auth/login` | Basic | **200** the user | **401** incorrect email or password · **403** account disabled |
 
-Emails are stored in lowercase. Passwords are stored only as bcrypt hashes and are never returned.
+Emails are stored in lowercase. Passwords are stored only as bcrypt hashes and are never returned. New users are always `tier: "free"`, `is_premium: false`: these fields can't be set at registration.
 
 ### Short links (`/api`)
 
 | Method and path | Auth | Success | Errors |
 |---|---|---|---|
-| `POST /api/shorten` `{"url", "tags"?}` | Basic | **201** a link (see below) | **401** · **422** invalid URL, more than 10 tags, or a tag longer than 50 characters |
-| `GET /api/{code}` | – (public) | **302** redirect, and **one click is recorded** | **404** unknown code |
+| `POST /api/shorten` | Basic | **201** a link (see below) | **401** · **409** custom alias already used · **422** invalid field |
+| `GET /api/{code}` (short code **or** custom alias) | – (public) | **302** redirect; the visit is recorded and `click_count` goes up by 1 | **404** unknown code · **410** link switched off or expired (no visit recorded) |
+
+`POST /api/shorten` body:
+
+| Field | Required | Rules |
+|---|---|---|
+| `url` | yes | valid `http(s)` URL |
+| `tags` | no | up to 10, each 1–50 characters |
+| `custom_alias` | no | 3–10 letters, digits, `-` or `_`; must not match any short code or alias; `urls` and `shorten` are reserved |
+| `title` / `description` / `favicon` | no | max 255 / 500 / 2048 characters |
+| `expires_at` | no | date and time **in the future** |
 
 ### Your links (`/api/urls`)
 
@@ -425,10 +469,14 @@ Emails are stored in lowercase. Passwords are stored only as bcrypt hashes and a
 | `GET /api/urls?limit=20&offset=0` | Basic | **200** your links, newest first (`limit` 1–100) | **401** · **422** bad `limit` / `offset` |
 | `GET /api/urls/stats` | Basic | **200** stats (see below) | **401** |
 | `GET /api/urls/{id}` | Basic | **200** one link | **401** · **404** not found or not yours |
-| `PATCH /api/urls/{id}` `{"url"?, "tags"?}` | Basic | **200** the updated link | **401** · **404** · **422** |
+| `PATCH /api/urls/{id}` | Basic | **200** the updated link | **401** · **404** · **409** alias taken · **422** |
 | `DELETE /api/urls/{id}` | Basic | **204** (its clicks and tag links are deleted too) | **401** · **404** |
 
-For `PATCH`, leave a field out to keep it unchanged. `"tags": []` removes all tags, and a new list replaces the old one.
+`PATCH` only changes the fields you send:
+- **leave a field out** to keep it,
+- send **`null`** to clear an optional field (`custom_alias`, `title`, `description`, `favicon`, `expires_at`),
+- `url`, `tags` and `is_active` can't be `null`; `"tags": []` removes all tags, and a new list replaces the old one,
+- `"is_active": false` switches the link off (it answers **410**); `true` switches it back on.
 
 A link looks like:
 ```json
@@ -437,24 +485,42 @@ A link looks like:
   "short_code": "aB3xY9",
   "short_url": "http://127.0.0.1:8000/api/aB3xY9",
   "original_url": "https://www.python.org/",
+  "custom_alias": "my-cv",
+  "alias_url": "http://127.0.0.1:8000/api/my-cv",
+  "title": "Python",
+  "description": "Docs",
+  "favicon": "https://www.python.org/favicon.ico",
   "tags": ["learning"],
   "click_count": 3,
-  "created_at": "2026-11-13T15:20:22.740332Z"
+  "is_active": true,
+  "expires_at": "2026-12-19T13:00:00Z",
+  "created_at": "2026-11-19T13:00:00Z"
 }
 ```
 
 Stats look like:
 ```json
 {
-  "total_urls": 4,
-  "total_clicks": 8,
-  "top_urls": [{"short_code": "aB3xY9", "original_url": "https://a.com/", "clicks": 5}],
-  "clicks_last_7_days": [{"day": "2026-11-13", "clicks": 8}],
+  "total_urls": 2,
+  "total_clicks": 24,
+  "top_urls": [{"short_code": "2RwOrg", "original_url": "https://b.com/", "clicks": 21}],
+  "clicks_last_7_days": [{"day": "2026-11-19", "clicks": 24}],
   "urls_per_tag": [{"tag": "shopping", "urls": 2}, {"tag": "books", "urls": 1}]
 }
 ```
 
 Tags are trimmed, lowercased and de-duplicated (`[" Shopping", "shopping"]` → `["shopping"]`). Tag names are shared between users: there is one `shopping` row in `tags`.
+
+### What a visit records
+
+Each successful redirect saves one row in `clicks`:
+
+| Column | Taken from |
+|---|---|
+| `ip_address` | the connection (`request.client.host`); anything that isn't a valid IP is saved as `0.0.0.0` |
+| `user_agent` | the `User-Agent` header (empty if missing) |
+| `referrer` | the `Referer` header (null if missing) |
+| `city`, `country` | not filled yet (no location lookup) |
 
 ### `GET /health`
 
@@ -467,7 +533,7 @@ Tags are trimmed, lowercased and de-duplicated (`[" Shopping", "shopping"]` → 
 Every error has the same JSON shape, produced by the global exception handlers in [app/errors.py](app/errors.py):
 
 ```json
-{ "status_code": 404, "message": "URL not found" }
+{ "status_code": 410, "message": "This short link has expired" }
 ```
 
 Validation errors (422) also list each problem:
@@ -485,8 +551,8 @@ Unexpected errors return `500` with `"Something went wrong on our side"`. The fu
 
 Every request is logged by the middleware in [app/middleware.py](app/middleware.py):
 ```
-2026-11-13 16:30:04,513 INFO app.middleware: POST /api/shorten -> 201 (23.4 ms)
-2026-11-13 16:30:04,523 INFO app.middleware: GET /api/aB3xY9 -> 302 (2.5 ms)
+2026-11-19 16:30:04,513 INFO app.middleware: POST /api/shorten -> 201 (23.4 ms)
+2026-11-19 16:30:04,523 INFO app.middleware: GET /api/aB3xY9 -> 302 (2.5 ms)
 ```
 
 ---
@@ -496,12 +562,12 @@ Every request is logged by the middleware in [app/middleware.py](app/middleware.
 ### 1. Start and migrate
 ```bash
 docker compose up --build -d
-alembic upgrade head
+docker compose exec api alembic upgrade head
 ```
 **Show:** in pgAdmin (`127.0.0.1:5433`) or with `\dt`, the tables `users`, `urls`, `clicks`, `tags`, `url_tags` and `alembic_version`.
 
 ### 2. Register two users
-In Swagger (**http://127.0.0.1:8000/docs**), use **POST /auth/register** twice: `ama@mail.com` and `kofi@mail.com`, both with `secret123` → **201**.
+In Swagger (**http://127.0.0.1:8000/docs**), use **POST /auth/register** twice: `ama@mail.com` and `kofi@mail.com`, both with `secret123` → **201**, with `tier: "free"`.
 Register `Ama@Mail.com` again → **409** (emails are compared in lowercase).
 
 **Show:** `users` stores `$2b$12$...` hashes, never the password.
@@ -509,39 +575,43 @@ Register `Ama@Mail.com` again → **409** (emails are compared in lowercase).
 ### 3. Log in as Ama
 Click **Authorize** and enter `ama@mail.com` / `secret123`. Call **POST /auth/login** → **200**.
 
-### 4. Create links with tags
+### 4. Create links
 **POST /api/shorten**:
+```json
+{ "url": "https://www.python.org", "custom_alias": "my-cv", "title": "Python", "tags": ["learning"] }
+```
 ```json
 { "url": "https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702", "tags": ["shopping", "books"] }
 ```
-```json
-{ "url": "https://www.python.org", "tags": ["learning"] }
-```
-→ **201** each time. Log out of Swagger and try again → **401**.
+→ **201** each time. Try the alias `my-cv` again → **409**. Log out of Swagger and try again → **401**.
 
-### 5. Open a short link a few times
-Paste a `short_url` into the **browser's address bar** (Swagger cannot follow redirects to other websites) → it redirects.
-**Show:** each visit adds a row to `clicks`.
+### 5. Open the links
+Paste a `short_url` **and** the `alias_url` into the **browser's address bar** (Swagger cannot follow redirects to other websites). Both redirect.
+**Show:** each visit adds a row to `clicks` (IP, browser, referrer), and `click_count` on the link goes up.
 
 ### 6. Manage the links
 - **GET /api/urls**: both links, newest first, with `tags` and `click_count`.
 - **PATCH /api/urls/{id}** with `{"tags": ["work"]}`: only the tags change.
 - **GET /api/urls/stats**: totals, top links, clicks per day, links per tag.
 
-### 7. Ownership
+### 7. Switch off and expire
+- **PATCH** `{"is_active": false}` → opening the link gives **410**, and `click_count` doesn't change. **PATCH** `{"is_active": true}` → it works again.
+- **PATCH** `{"expires_at": null}` removes an expiry date. An expiry in the past is refused with **422**.
+
+### 8. Ownership
 Authorize as `kofi@mail.com`. **GET /api/urls** → `[]`. **GET**, **PATCH** or **DELETE** one of Ama's ids → **404**.
 
-### 8. Delete
+### 9. Delete
 As Ama, **DELETE /api/urls/{id}** → **204**. **Show:** its rows in `clicks` and `url_tags` are gone too (`ON DELETE CASCADE`), and the tags themselves stay.
 
-### 9. Migrations
+### 10. Migrations
 ```bash
-alembic downgrade -1    # composite indexes → back to single-column indexes
-alembic upgrade head    # and forward again
-alembic current         # ed410620164d (head)
+docker compose exec api alembic downgrade -1    # removes the visitor details from clicks
+docker compose exec api alembic upgrade head    # and adds them back
+docker compose exec api alembic current         # 6c4844556bc0 (head)
 ```
 
-### 10. Production profile
+### 11. Production profile
 ```bash
 docker compose down
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
@@ -554,25 +624,37 @@ docker compose exec api alembic upgrade head
 ## Design decisions
 
 **ORM only, no raw SQL in the application.**
-Every query is built with SQLAlchemy (`select`, `where`, `join`, `group_by`, `func.count`) inside a repository. SQL text appears only in the generated migrations and in manual `EXPLAIN` checks.
+Every query is built with SQLAlchemy (`select`, `where`, `join`, `group_by`, `func.count`, `func.sum`, `update`) inside a repository. SQL text appears only in `CHECK` constraint expressions, in the migrations, and in manual `EXPLAIN` checks.
 
 **One session per request.**
-`get_db()` opens a session, lends it to the request, and always closes it in `finally`. Anything not committed is rolled back. FastAPI caches `get_db` within a request, so the user, URL and tag repositories in the same request share one session and one transaction. For example, creating a link with new tags is a single `commit()`.
+`get_db()` opens a session, lends it to the request, and always closes it in `finally`. Anything not committed is rolled back. FastAPI caches `get_db` within a request, so the user, URL and tag repositories in the same request share one session and one transaction. For example, creating a link with new tags is a single `commit()`, and so is recording a visit together with its counter update.
 
 **Session settings.**
 `expire_on_commit=False` lets a route return an object after `commit()` without another query. `autoflush=False` means nothing is sent to the database before we commit. `pool_pre_ping=True` replaces dead connections, for example after a database restart.
+
+**Stored click counter.**
+Suggested in code review; see [Stored click counter](#stored-click-counter-from-code-review). Reads are frequent and cheap, and the small extra write per visit is atomic.
+
+**Rules in the database.**
+Django's `choices` and `PositiveIntegerField` become `CHECK` constraints, and `GenericIPAddressField` becomes PostgreSQL's `INET` type, so invalid values are rejected by the database, not only by Python.
+
+**404 vs 410 on redirect.**
+`404` means the code was never known. `410 Gone` means the link exists but is switched off or expired. Neither records a visit.
+
+**Updates that tell "left out" from "null".**
+`PATCH` uses Pydantic's `exclude_unset`, so a field that isn't sent is kept, while `null` clears it. This is needed to remove an alias or an expiry date.
 
 **HTTP Basic auth for this module.**
 It's the simplest correct option: no extra package, no extra table. All authorization goes through one dependency, `get_current_user`, so switching to JWT next module changes only that function. The routes stay the same.
 
 **bcrypt for passwords.**
-Hashing goes through `pwdlib`. Argon2 was the first choice, but its compiled module was blocked by Windows application control on the development machine, so bcrypt (also a slow, salted password hash) is used. bcrypt reads at most 72 bytes, so passwords are limited to 8–72 characters, and longer ones get a clear 422 instead of a server error.
+Hashing goes through `pwdlib`. Argon2 was the first choice, but its compiled module was blocked by Windows application control on the development machine, so bcrypt (also a slow, salted password hash; cost 12 ≈ 0.25 s per hash) is used. bcrypt reads at most 72 bytes, so passwords are limited to 8–72 characters, and longer ones get a clear 422 instead of a server error.
 
 **404 instead of 403 for other users' links.**
 The ownership filter is part of the query, so another user's link is indistinguishable from a link that doesn't exist.
 
 **Random codes with a collision check.**
-Codes are 6 characters from `a-z`, `A-Z` and `0-9` (62⁶ ≈ 56 billion combinations), generated with the `secrets` module. The service checks `code_exists` before saving, and the unique index on `short_code` is the final guarantee.
+Codes are 6 characters from `a-z`, `A-Z` and `0-9` (62⁶ ≈ 56 billion combinations), generated with the `secrets` module. The service checks that the code isn't used as a short code **or** an alias, and the unique index on `short_code` is the final guarantee.
 
 **Multi-stage Dockerfile.**
 Stage 1 installs the packages into a virtual environment. Stage 2 copies only that environment, `app/` and the Alembic files into a clean `python:3.14-slim` image that runs as a non-root user.
@@ -585,6 +667,10 @@ Three handlers in [app/errors.py](app/errors.py) cover HTTP errors, validation e
 ## Known limitations
 
 - **Basic auth** sends the password on every request and checks it with bcrypt each time (slow on purpose). It's fine for this module, and it's replaced by JWT in the next one.
+- **Visitor IP behind Docker or a proxy:** the app sees the address of whatever is directly in front of it. In local Docker that is the Docker network gateway (e.g. `172.18.0.1`), not the real visitor. Behind a trusted reverse proxy, the real IP would be read from `X-Forwarded-For`.
+- **Not filled automatically:** `city` and `country` need a geo-IP lookup, and `title`, `description` and `favicon` would need the target page to be fetched. They can be set by the owner (link details) or stay empty (click location).
+- **`tier` and `is_premium`** are stored and returned, but no feature depends on them yet (for example, custom aliases for premium users only).
+- **Alias vs short code at the same instant:** aliases are unique among aliases, and codes among codes (unique indexes). An alias matching another link's **short code** is checked by the app, so two requests at exactly the same moment could in theory get past that check.
 - **New tag race:** if two requests create the same **new** tag name at exactly the same moment, the second one can fail on the unique index. PostgreSQL's `INSERT ... ON CONFLICT DO NOTHING` would remove this.
-- **Clicks are written synchronously** on each redirect. At very high traffic, they could be buffered (for example in a queue) and written in batches.
+- **Visits are written synchronously** on each redirect (a click row and a counter update). At very high traffic, they could be buffered (for example in a queue) and written in batches.
 - **`offset` pagination** gets slower for very deep pages. Keyset pagination (`WHERE id < last_seen_id`) would keep it constant, and the `(user_id, id)` index already supports it.
