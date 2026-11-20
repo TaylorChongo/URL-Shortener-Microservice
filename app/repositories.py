@@ -56,6 +56,17 @@ class URLRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
+    def get_user_link_for_url(self, user_id: int, original_url: str) -> URL | None:
+        # "does this user already have a link for this URL?"
+        # comparing md5(...) lets Postgres use the uq_urls_user_id_original_url index;
+        # the plain comparison makes sure it really is the same URL
+        statement = select(URL).where(
+            URL.user_id == user_id,
+            func.md5(URL.original_url) == func.md5(original_url),
+            URL.original_url == original_url,
+        )
+        return self.db.scalar(statement)
+
     def code_exists(self, code: str) -> bool:
         # a code is taken if it is used as a short code OR as a custom alias
         statement = select(URL.id).where(or_(URL.short_code == code, URL.custom_alias == code))

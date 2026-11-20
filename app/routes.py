@@ -34,7 +34,7 @@ from app.schemas import (
     ValidationErrorResponse,
 )
 from app.security import hash_password
-from app.services import AliasTakenError, UrlShortenerService, alias_is_available
+from app.services import AliasTakenError, DuplicateURLError, UrlShortenerService, alias_is_available
 
 
 auth_router = APIRouter(prefix="/auth", tags=["auth"])
@@ -111,7 +111,21 @@ def to_url_response(url: URL) -> URLResponse:
     )
 
 
-ALIAS_TAKEN = {409: {"model": ErrorResponse, "description": "This custom alias is already used"}}
+ALIAS_TAKEN = {409: {"model": ErrorResponse, "description": "This custom alias is already used, or you already shortened this URL"}}
+
+
+def raise_already_shortened(existing: URL) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"You already shortened this URL: {BASE_URL}/api/{existing.short_code} (id {existing.id})",
+    )
+
+
+def raise_conflict_from_database(error: IntegrityError) -> None:
+    # the error text names the database rule that refused the save
+    if "uq_urls_user_id_original_url" in str(error.orig):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You already shortened this URL")
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
 
 # how many rows each "clicks per ..." statistics list shows
 TOP = 10
@@ -166,9 +180,13 @@ def create_short_url(
         url = service.shorten(
             user_id=current_user.id, original_url=str(body.url), tag_names=body.tags, details=details
         )
-    except (AliasTakenError, IntegrityError):
-        # IntegrityError: someone took the same alias at the same moment (the unique index refused it)
+    except DuplicateURLError as error:
+        raise_already_shortened(error.existing)
+    except AliasTakenError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
+    except IntegrityError as error:
+        # two requests at the same moment: the database rule refused the second one
+        raise_conflict_from_database(error)
     return to_url_response(url)
 
 @router.get(
@@ -364,10 +382,16 @@ def update_url(
     if tags_changed:
         new_tags = tags.get_or_create(body.tags)
 
+    if "original_url" in changes:
+        existing = urls.get_user_link_for_url(current_user.id, changes["original_url"])
+        if existing is not None:
+            raise_already_shortened(existing)
+
     try:
         url = urls.update(url, changes=changes, tags=new_tags)
-    except IntegrityError:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
+    except IntegrityError as error:
+        # two requests at the same moment: the database rule refused the second one
+        raise_conflict_from_database(error)
     return to_url_response(url)
 
 

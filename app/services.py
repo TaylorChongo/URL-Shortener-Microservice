@@ -16,6 +16,13 @@ class AliasTakenError(Exception):
     pass
 
 
+class DuplicateURLError(Exception):
+    # the user already has a link for this URL; we keep it to tell them which one
+    def __init__(self, existing: URL) -> None:
+        super().__init__("You already shortened this URL")
+        self.existing = existing
+
+
 def alias_is_available(urls: URLRepository, alias: str) -> bool:
     if alias.lower() in RESERVED_ALIASES:
         return False
@@ -34,6 +41,10 @@ class UrlShortenerService:
         return code
 
     def shorten(self, user_id: int, original_url: str, tag_names: list[str], details: dict) -> URL:
+        existing = self.urls.get_user_link_for_url(user_id, original_url)
+        if existing is not None:
+            raise DuplicateURLError(existing)
+
         alias = details.get("custom_alias")
         if alias is not None and not alias_is_available(self.urls, alias):
             raise AliasTakenError()
