@@ -8,8 +8,9 @@ from app.repositories import TagRepository, URLRepository
 ALPHABET = string.ascii_letters + string.digits
 CODE_LENGTH = 6
 
-# these words are already used by the app's own addresses (/api/urls, /api/shorten)
-RESERVED_ALIASES = ["urls", "shorten"]
+# Short links live at the root (/{code}), so these words are taken by the app's own pages
+# and can never be an alias or a generated short code.
+RESERVED_CODES = ["api", "docs", "redoc", "health"]
 
 
 class AliasTakenError(Exception):
@@ -24,7 +25,7 @@ class DuplicateURLError(Exception):
 
 
 def alias_is_available(urls: URLRepository, alias: str) -> bool:
-    if alias.lower() in RESERVED_ALIASES:
+    if alias.lower() in RESERVED_CODES:
         return False
     return not urls.code_exists(alias)
 
@@ -50,7 +51,7 @@ class UrlShortenerService:
             raise AliasTakenError()
 
         code = self.generate_code()
-        while self.urls.code_exists(code):
+        while code.lower() in RESERVED_CODES or self.urls.code_exists(code):
             code = self.generate_code()
 
         tags = self.tags.get_or_create(tag_names)

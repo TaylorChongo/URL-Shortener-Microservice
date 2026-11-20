@@ -84,10 +84,11 @@ class URLRepository:
         statement = select(URL).where(or_(URL.short_code == code, URL.custom_alias == code))
         return self.db.scalar(statement)
 
-    def get_for_user(self, user_id: int, url_id: int) -> URL | None:
+    def get_for_user(self, user_id: int, code: str) -> URL | None:
+        # "this user's link whose short code OR custom alias is <code>" (both have a unique index)
         statement = (
             select(URL)
-            .where(URL.id == url_id, URL.user_id == user_id)
+            .where(or_(URL.short_code == code, URL.custom_alias == code), URL.user_id == user_id)
             .options(selectinload(URL.tags))
         )
         return self.db.scalar(statement)

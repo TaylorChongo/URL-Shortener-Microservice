@@ -12,7 +12,7 @@ from app.errors import (
     validation_exception_handler,
 )
 from app.middleware import log_requests
-from app.routes import auth_router, router, urls_router
+from app.routes import auth_router, redirect_router, urls_router
 
 
 def create_app() -> FastAPI:
@@ -25,9 +25,6 @@ def create_app() -> FastAPI:
         version="1.0.0",
         debug=DEBUG,
     )
-    app.include_router(auth_router)
-    app.include_router(urls_router)
-    app.include_router(router)
     app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
@@ -37,6 +34,12 @@ def create_app() -> FastAPI:
     @app.get("/health", tags=["health"], summary="Check that the service is running")
     def health():
         return {"status": "ok", "env": APP_ENV}
+
+    app.include_router(auth_router)
+    app.include_router(urls_router)
+    # the redirect (/{code}) catches any single-word address, so it must come last,
+    # after /health and the /api/v1 routes (/docs and /openapi.json are added by FastAPI first)
+    app.include_router(redirect_router)
 
     return app
 

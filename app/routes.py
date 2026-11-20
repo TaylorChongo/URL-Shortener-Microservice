@@ -26,9 +26,9 @@ from app.schemas import (
     StatsResponse,
     TagCount,
     TopURL,
-    UserAgentCount,
     URLResponse,
     URLUpdate,
+    UserAgentCount,
     UserCreate,
     UserRead,
     ValidationErrorResponse,
@@ -36,8 +36,93 @@ from app.schemas import (
 from app.security import hash_password
 from app.services import AliasTakenError, DuplicateURLError, UrlShortenerService, alias_is_available
 
+API_PREFIX = "/api/v1"
 
-auth_router = APIRouter(prefix="/auth", tags=["auth"])
+# how many rows each "clicks per ..." statistics list shows
+TOP = 10
+
+NOT_LOGGED_IN = {401: {"model": ErrorResponse, "description": "You are not logged in"}}
+NOT_FOUND = {404: {"model": ErrorResponse, "description": "No link with this short code belongs to you"}}
+CONFLICT = {409: {"model": ErrorResponse, "description": "This custom alias is already used, or you already shortened this URL"}}
+
+
+# ---------- helpers ----------
+
+def short_link(code: str) -> str:
+    # short links live at the root of the site: http://127.0.0.1:8000/aB3xY9
+    return f"{BASE_URL}/{code}"
+
+
+def to_url_response(url: URL) -> URLResponse:
+    alias_url = None
+    if url.custom_alias is not None:
+        alias_url = short_link(url.custom_alias)
+
+    return URLResponse(
+        id=url.id,
+        short_code=url.short_code,
+        short_url=short_link(url.short_code),
+        original_url=url.original_url,
+        custom_alias=url.custom_alias,
+        alias_url=alias_url,
+        title=url.title,
+        description=url.description,
+        favicon=url.favicon,
+        tags=[tag.name for tag in url.tags],
+        click_count=url.click_count,
+        is_active=url.is_active,
+        expires_at=url.expires_at,
+        created_at=url.created_at,
+    )
+
+
+def raise_already_shortened(existing: URL) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=f"You already shortened this URL: {short_link(existing.short_code)}",
+    )
+
+
+def raise_conflict_from_database(error: IntegrityError) -> None:
+    # the error text names the database rule that refused the save
+    if "uq_urls_user_id_original_url" in str(error.orig):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You already shortened this URL")
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
+
+
+def hide_ip(ip_address) -> str:
+    # The full IP stays in the database; stats only show part of it, to protect the visitor.
+    # IPv4: 196.216.180.1 -> 196.216.180.xxx    IPv6: keep the first 4 groups only
+    ip = ipaddress.ip_address(str(ip_address))
+    if ip.version == 4:
+        parts = str(ip).split(".")
+        return ".".join(parts[:3]) + ".xxx"
+    groups = ip.exploded.split(":")
+    return ":".join(groups[:4]) + ":xxxx:xxxx:xxxx:xxxx"
+
+
+def visitor_ip(request: Request) -> str:
+    # the clicks.ip_address column only accepts real IP addresses,
+    # so anything else (missing, or a name like "testclient") is saved as 0.0.0.0
+    if request.client is None:
+        return "0.0.0.0"
+    try:
+        ipaddress.ip_address(request.client.host)
+    except ValueError:
+        return "0.0.0.0"
+    return request.client.host
+
+
+def get_own_url_or_404(urls: URLRepository, user: User, short_code: str) -> URL:
+    url = urls.get_for_user(user_id=user.id, code=short_code)
+    if url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="URL not found")
+    return url
+
+
+# ---------- /api/v1/auth ----------
+
+auth_router = APIRouter(prefix=f"{API_PREFIX}/auth", tags=["auth"])
 
 
 @auth_router.post(
@@ -85,77 +170,13 @@ def login(current_user: User = Depends(get_current_user)) -> UserRead:
     return current_user
 
 
-router = APIRouter(prefix="/api", tags=["shortener"])
+# ---------- /api/v1/urls ----------
+
+urls_router = APIRouter(prefix=f"{API_PREFIX}/urls", tags=["urls"])
 
 
-def to_url_response(url: URL) -> URLResponse:
-    alias_url = None
-    if url.custom_alias is not None:
-        alias_url = f"{BASE_URL}/api/{url.custom_alias}"
-
-    return URLResponse(
-        id=url.id,
-        short_code=url.short_code,
-        short_url=f"{BASE_URL}/api/{url.short_code}",
-        original_url=url.original_url,
-        custom_alias=url.custom_alias,
-        alias_url=alias_url,
-        title=url.title,
-        description=url.description,
-        favicon=url.favicon,
-        tags=[tag.name for tag in url.tags],
-        click_count=url.click_count,
-        is_active=url.is_active,
-        expires_at=url.expires_at,
-        created_at=url.created_at,
-    )
-
-
-ALIAS_TAKEN = {409: {"model": ErrorResponse, "description": "This custom alias is already used, or you already shortened this URL"}}
-
-
-def raise_already_shortened(existing: URL) -> None:
-    raise HTTPException(
-        status_code=status.HTTP_409_CONFLICT,
-        detail=f"You already shortened this URL: {BASE_URL}/api/{existing.short_code} (id {existing.id})",
-    )
-
-
-def raise_conflict_from_database(error: IntegrityError) -> None:
-    # the error text names the database rule that refused the save
-    if "uq_urls_user_id_original_url" in str(error.orig):
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="You already shortened this URL")
-    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
-
-# how many rows each "clicks per ..." statistics list shows
-TOP = 10
-
-
-def hide_ip(ip_address) -> str:
-    # The full IP stays in the database; stats only show part of it, to protect the visitor.
-    # IPv4: 196.216.180.1 -> 196.216.180.xxx    IPv6: keep the first 4 groups only
-    ip = ipaddress.ip_address(str(ip_address))
-    if ip.version == 4:
-        parts = str(ip).split(".")
-        return ".".join(parts[:3]) + ".xxx"
-    groups = ip.exploded.split(":")
-    return ":".join(groups[:4]) + ":xxxx:xxxx:xxxx:xxxx"
-
-
-def visitor_ip(request: Request) -> str:
-    # the clicks.ip_address column only accepts real IP addresses,
-    # so anything else (missing, or a name like "testclient") is saved as 0.0.0.0
-    if request.client is None:
-        return "0.0.0.0"
-    try:
-        ipaddress.ip_address(request.client.host)
-    except ValueError:
-        return "0.0.0.0"
-    return request.client.host
-
-
-@router.post(
-    "/shorten",
+@urls_router.post(
+    "",
     response_model=URLResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create a short URL",
@@ -165,8 +186,8 @@ def visitor_ip(request: Request) -> str:
         "and an expiry date. The link belongs to you."
     ),
     responses={
-        401: {"model": ErrorResponse, "description": "You are not logged in"},
-        **ALIAS_TAKEN,
+        **NOT_LOGGED_IN,
+        **CONFLICT,
         422: {"model": ValidationErrorResponse, "description": "One of the fields is not valid"},
     },
 )
@@ -189,57 +210,6 @@ def create_short_url(
         raise_conflict_from_database(error)
     return to_url_response(url)
 
-@router.get(
-    "/{code}",
-    response_class=RedirectResponse,
-    status_code=status.HTTP_302_FOUND,
-    summary="Redirect to the original URL",
-    description=(
-        "Looks up the short code (or custom alias), records the visit and redirects to the original URL. "
-        "Open the short link in your browser's address bar to test it: "
-        "Swagger's 'Try it out' cannot follow redirects to other websites."
-    ),
-    responses={
-        302: {"description": "Redirects to the original URL"},
-        404: {"model": ErrorResponse, "description": "No URL was found for this short code"},
-        410: {"model": ErrorResponse, "description": "The link was switched off or has expired"},
-        422: {"model": ValidationErrorResponse, "description": "The short code is not valid"},
-    },
-)
-def redirect_to_url(
-    code: str,
-    request: Request,
-    service: UrlShortenerService = Depends(get_shortener_service)
-) -> RedirectResponse:
-    url = service.find(code)
-    if url is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
-    if not url.is_active:
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has been switched off")
-    if url.expires_at is not None and url.expires_at <= datetime.now(timezone.utc):
-        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has expired")
-
-    service.record_visit(
-        url,
-        ip_address=visitor_ip(request),
-        user_agent=request.headers.get("user-agent", ""),
-        referrer=request.headers.get("referer"),
-    )
-    return RedirectResponse(url=url.original_url, status_code=status.HTTP_302_FOUND)
-    
-
-urls_router = APIRouter(prefix="/api/urls", tags=["urls"])
-
-NOT_FOUND = {404: {"model": ErrorResponse, "description": "No URL with this id belongs to you"}}
-NOT_LOGGED_IN = {401: {"model": ErrorResponse, "description": "You are not logged in"}}
-
-
-def get_own_url_or_404(urls: URLRepository, user: User, url_id: int) -> URL:
-    url = urls.get_for_user(user_id=user.id, url_id=url_id)
-    if url is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="URL not found")
-    return url
-
 
 @urls_router.get(
     "",
@@ -258,6 +228,7 @@ def list_urls(
     return [to_url_response(url) for url in page]
 
 
+# /stats must be declared before /{short_code}, or "stats" would be read as a short code
 @urls_router.get(
     "/stats",
     response_model=StatsResponse,
@@ -307,46 +278,60 @@ def get_stats(
 
 
 @urls_router.get(
-    "/{url_id}",
+    "/{short_code}",
     response_model=URLResponse,
     summary="Get one of your URLs",
-    description="Login required. Returns 404 if the URL does not exist or is not yours.",
+    description="Login required. Use the link's short code (or its custom alias). Returns 404 if it does not exist or is not yours.",
     responses={**NOT_LOGGED_IN, **NOT_FOUND},
 )
 def get_url(
-    url_id: int,
+    short_code: str,
     current_user: User = Depends(get_current_user),
     urls: URLRepository = Depends(get_url_repository),
 ) -> URLResponse:
-    url = get_own_url_or_404(urls, current_user, url_id)
+    url = get_own_url_or_404(urls, current_user, short_code)
     return to_url_response(url)
 
 
-@urls_router.patch(
-    "/{url_id}",
+# The same function answers both PUT (what the spec asks for) and PATCH:
+# in both cases only the fields you send are changed.
+@urls_router.put(
+    "/{short_code}",
     response_model=URLResponse,
     summary="Update one of your URLs",
     description=(
         "Login required. Send only what you want to change. Leave a field out to keep it. "
         "Send null to clear an optional field (custom_alias, title, description, favicon, expires_at). "
         "Send is_active false to switch the link off. "
-        "If nothing you sent differs from the current values, the answer is 400."
+        "If nothing you sent differs from the current values, the answer is 400. "
+        "PUT and PATCH behave the same."
     ),
     responses={
         400: {"model": ErrorResponse, "description": "Nothing was sent, or nothing would change"},
         **NOT_LOGGED_IN,
         **NOT_FOUND,
-        **ALIAS_TAKEN,
+        **CONFLICT,
+    },
+)
+@urls_router.patch(
+    "/{short_code}",
+    response_model=URLResponse,
+    summary="Update one of your URLs (same as PUT)",
+    responses={
+        400: {"model": ErrorResponse, "description": "Nothing was sent, or nothing would change"},
+        **NOT_LOGGED_IN,
+        **NOT_FOUND,
+        **CONFLICT,
     },
 )
 def update_url(
-    url_id: int,
+    short_code: str,
     body: URLUpdate,
     current_user: User = Depends(get_current_user),
     urls: URLRepository = Depends(get_url_repository),
     tags: TagRepository = Depends(get_tag_repository),
 ) -> URLResponse:
-    url = get_own_url_or_404(urls, current_user, url_id)
+    url = get_own_url_or_404(urls, current_user, short_code)
 
     if not body.model_fields_set:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
@@ -396,17 +381,77 @@ def update_url(
 
 
 @urls_router.delete(
-    "/{url_id}",
+    "/{short_code}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete one of your URLs",
-    description="Login required. Its clicks and tag links are deleted too.",
-    responses={**NOT_LOGGED_IN, **NOT_FOUND},
+    summary="Switch off (or delete) one of your URLs",
+    description=(
+        "Login required. By default the link is switched off (is_active becomes false): it stops "
+        "redirecting (410) but keeps its history, and can be switched back on with PUT/PATCH. "
+        "Add ?permanent=true to delete it for good, together with its clicks."
+    ),
+    responses={
+        400: {"model": ErrorResponse, "description": "The link is already switched off"},
+        **NOT_LOGGED_IN,
+        **NOT_FOUND,
+    },
 )
 def delete_url(
-    url_id: int,
+    short_code: str,
+    permanent: bool = Query(default=False, description="true deletes the link and its clicks for good"),
     current_user: User = Depends(get_current_user),
     urls: URLRepository = Depends(get_url_repository),
 ) -> Response:
-    url = get_own_url_or_404(urls, current_user, url_id)
-    urls.delete(url)
+    url = get_own_url_or_404(urls, current_user, short_code)
+
+    if permanent:
+        urls.delete(url)
+    elif not url.is_active:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="This link is already switched off")
+    else:
+        urls.update(url, changes={"is_active": False}, tags=None)
+
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- /{short_code}: the public redirect ----------
+# Registered last in main.py, so it never hides /docs, /health or /api/... addresses.
+
+redirect_router = APIRouter(tags=["redirect"])
+
+
+@redirect_router.get(
+    "/{code}",
+    response_class=RedirectResponse,
+    status_code=status.HTTP_302_FOUND,
+    summary="Redirect to the original URL",
+    description=(
+        "Public, no login. Looks up the short code (or custom alias), records the visit and redirects "
+        "to the original URL. Open the short link in your browser's address bar to test it: "
+        "Swagger's 'Try it out' cannot follow redirects to other websites."
+    ),
+    responses={
+        302: {"description": "Redirects to the original URL"},
+        404: {"model": ErrorResponse, "description": "No URL was found for this short code"},
+        410: {"model": ErrorResponse, "description": "The link was switched off or has expired"},
+    },
+)
+def redirect_to_url(
+    code: str,
+    request: Request,
+    service: UrlShortenerService = Depends(get_shortener_service),
+) -> RedirectResponse:
+    url = service.find(code)
+    if url is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Short URL not found")
+    if not url.is_active:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has been switched off")
+    if url.expires_at is not None and url.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="This short link has expired")
+
+    service.record_visit(
+        url,
+        ip_address=visitor_ip(request),
+        user_agent=request.headers.get("user-agent", ""),
+        referrer=request.headers.get("referer"),
+    )
+    return RedirectResponse(url=url.original_url, status_code=status.HTTP_302_FOUND)
