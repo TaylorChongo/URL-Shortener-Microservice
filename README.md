@@ -1,6 +1,6 @@
 # URL Shortener Microservice
 
-A REST API that turns long URLs into short codes and redirects short codes back to the original URL. Each user has an account and manages **only their own** links: list, view, update, delete, tag them, give them a custom alias or an expiry date, switch them off, and see click statistics. Every visit is recorded with the visitor's IP address, browser and referrer.
+A REST API that turns long URLs into short codes and redirects short codes back to the original URL. Each user has an account and manages **only their own** links: list, view, update, delete, tag them, give them a custom alias or an expiry date, switch them off, and see click statistics. Every visit is recorded with the visitor's IP address, browser, referrer, country and city, and the statistics break visits down by each of these. A user can shorten a given URL only once.
 
 It is built with **FastAPI**, stores data in **PostgreSQL** through the **SQLAlchemy 2.x ORM**, manages the schema with **Alembic** migrations, and runs with **Docker Compose**. Interactive **Swagger** documentation is generated automatically.
 
@@ -41,6 +41,7 @@ GET  /api/urls/stats                                                            
 | Alembic | Database migrations |
 | psycopg 3 | PostgreSQL driver |
 | pwdlib + bcrypt | Password hashing |
+| maxminddb + DB-IP City Lite | Offline IP → country and city lookup for visits |
 | python-decouple | Reads configuration from environment variables / `.env` |
 | Gunicorn + Uvicorn workers | Production server with several worker processes |
 | Docker + Docker Compose | Containers for the app and PostgreSQL |
@@ -106,7 +107,8 @@ The lab is written for Flask. This project uses FastAPI, and every Flask require
 | App factory | `main.py` | Builds the app and plugs in routers, middleware and error handlers |
 | Routes | `routes.py` | HTTP only: read the request, call a repository or service, return the response |
 | Schemas | `schemas.py` | The shape of requests, responses and errors (and their Swagger examples) |
-| Service | `services.py` | Business logic: unique 6-character codes, custom alias checks, recording visits |
+| Service | `services.py` | Business logic: unique 6-character codes, custom alias and duplicate URL checks, recording visits |
+| Location | `geoip.py` | Looks up an IP's country and city in the offline location file |
 | Repositories | `repositories.py` | **Every database query**, one class per model (the "managers") |
 | Models | `models.py` | Tables, columns, constraints, indexes and relationships |
 | Database | `database.py` | Engine (connection pool), session factory, `Base`, `get_db()` |
@@ -122,6 +124,7 @@ Routes never write queries. They ask a repository, so every query lives in one p
 docker-compose.yml
  ├── api  (built from Dockerfile)    port 8000 → your PC
  │     ├── connects to postgresql://db:5432
+ │     ├── ./data is shared read-only (the IP location file), in development and production
  │     └── development: ./app, ./alembic and alembic.ini are shared with the container
  └── db   (postgres:18-alpine)       port 5433 → your PC (development only, hidden in production)
        └── named volume "postgres-data"   data survives restarts
@@ -198,7 +201,7 @@ How to read it:
 | Table | Constraints and indexes |
 |---|---|
 | `users` | PK `id` · **unique index** `ix_users_email` · **CHECK** `ck_users_tier` (`tier IN ('free', 'premium', 'admin')`) |
-| `urls` | PK `id` · **unique indexes** `ix_urls_short_code`, `ix_urls_custom_alias` · FK `user_id → users.id ON DELETE CASCADE` · **composite index** `ix_urls_user_id_id (user_id, id)` · **CHECK** `ck_urls_click_count_not_negative` (`click_count >= 0`) |
+| `urls` | PK `id` · **unique indexes** `ix_urls_short_code`, `ix_urls_custom_alias` · **unique expression index** `uq_urls_user_id_original_url (user_id, md5(original_url))`: one link per URL per user · FK `user_id → users.id ON DELETE CASCADE` · **composite index** `ix_urls_user_id_id (user_id, id)` · **CHECK** `ck_urls_click_count_not_negative` (`click_count >= 0`) |
 | `clicks` | PK `id` · FK `url_id → urls.id ON DELETE CASCADE` · **composite index** `ix_clicks_url_id_clicked_at (url_id, clicked_at)` · `ip_address` uses PostgreSQL's `INET` type, which rejects anything that isn't an IP address |
 | `tags` | PK `id` · **unique index** `ix_tags_name` |
 | `url_tags` | **Composite PK** `(url_id, tag_id)` (a tag can't be added twice to a link) · FKs to both sides `ON DELETE CASCADE` · index `ix_url_tags_tag_id` |
@@ -219,8 +222,11 @@ How to read it:
 | 5 | `b2489dff4602` | Add `is_premium` and `tier` to `users` | added the `tier` CHECK constraint |
 | 6 | `0c6a9ac83683` | Add `custom_alias`, `title`, `description`, `favicon`, `is_active`, `expires_at` and `click_count` to `urls` | added the `click_count >= 0` CHECK, and a **data step** that fills `click_count` from the clicks already recorded |
 | 7 | `6c4844556bc0` | Add `ip_address`, `user_agent`, `referrer`, `city`, `country` to `clicks` | required columns on a table with existing rows: added **temporary defaults** (`0.0.0.0`, empty) for old rows, then removed them so new clicks must provide real values |
+| 8 | `81f75907bc05` | One link per URL per user: unique index on `(user_id, md5(original_url))` | a **data step first merges existing duplicates** (see below), otherwise the index can't be created |
 
-Each migration was autogenerated from the models, **reviewed**, corrected where needed, then applied. Autogenerate doesn't detect `CHECK` constraints or data changes, which is why migrations 5–7 needed manual additions. Every migration has a working `downgrade()`, and migrations 4–7 were tested by running `upgrade → downgrade → upgrade`.
+Each migration was autogenerated from the models, **reviewed**, corrected where needed, then applied. Autogenerate doesn't detect `CHECK` constraints or data changes, which is why migrations 5–8 needed manual additions. Every migration has a working `downgrade()`, and migrations 4–8 were tested by running `upgrade → downgrade → upgrade`.
+
+**Merging duplicates (migration 8).** Before the unique rule existed, a user could shorten the same URL several times. For each such group, the migration keeps the **most-clicked** link (the oldest if tied), so a link that was already shared keeps working. It moves the others' clicks and tags onto it, adds their click counts to its `click_count`, keeps an alias if only a removed copy had one, then deletes the other copies. It was first run on a **copy of the database** with harder cases (tied clicks, different tags, an alias on a copy being removed) before the real data. Its `downgrade()` removes the rule only: merged links can't be split apart again.
 
 The data step in migration 6 is written with SQLAlchemy Core, not raw SQL:
 ```python
@@ -237,8 +243,8 @@ FastAPI has no equivalent of Django's `Model.objects` manager, so each model get
 | Repository | Methods |
 |---|---|
 | `UserRepository` | `get_by_email`, `get_by_id`, `create` |
-| `TagRepository` | `get_or_create(names)`: cleans names, then finds the existing ones in **one** `IN (...)` query and creates the rest |
-| `URLRepository` | `code_exists` (short code **or** alias), `create`, `get_by_code` (short code **or** alias), `get_for_user`, `list_for_user`, `update` (only the fields sent), `delete`, `add_click`, plus the stats queries |
+| `TagRepository` | `get_or_create(names)`: cleans names (`clean_tag_names`: trimmed, lowercase, no repeats), then finds the existing ones in **one** `IN (...)` query and creates the rest |
+| `URLRepository` | `code_exists` (short code **or** alias), `get_user_link_for_url` (duplicate check), `create`, `get_by_code` (short code **or** alias), `get_for_user`, `list_for_user`, `update` (only the fields that changed), `delete`, `add_click`, plus the stats queries, including the reusable `clicks_grouped_by(user_id, column, limit)` |
 
 **Ownership is part of every query.** `get_for_user` filters on **both** `URL.id` and `URL.user_id`. Another user's link is simply "not found" (`404`), so the API never reveals that it exists. The owner is always taken from the login, never from the request body.
 
@@ -267,7 +273,7 @@ The `clicks` table is kept: it holds *when* and *from where* (IP, browser, refer
 |---|---|---|
 | `GET /api/urls` | 2 | the page of links (with their stored `click_count`) · `selectinload(URL.tags)` loads all their tags in one query |
 | `GET /api/urls/{id}` | 2 | same, for one link |
-| `GET /api/urls/stats` | 5 | one aggregate query per figure |
+| `GET /api/urls/stats` | 10 | one aggregate query per figure |
 
 These counts exclude the login check. Measured with SQLAlchemy's `before_cursor_execute` event. Without `selectinload`, the list made `1 + N` queries (measured: 4 queries for 3 links, so a 100-link page would need 101). Before the stored counter, the list needed a third query to count clicks.
 
@@ -276,10 +282,13 @@ Other details:
 - Saving a user is a single `INSERT ... RETURNING id, created_at`, with no extra reload query.
 - Pagination (`limit` 1–100, `offset`) keeps responses small.
 - Looking up a link by short code **or** alias uses the two unique indexes.
+- The duplicate check compares `md5(original_url)`, so it can use the `(user_id, md5(original_url))` index; it also compares the full text to be certain.
 
 ### Indexes, and how they were checked
 
-Indexes exist for the columns the app actually **searches by**: email at login, `short_code` and `custom_alias` on every redirect, owner on every list, `url_id` + date when counting clicks per day, and tag name.
+Indexes exist for the columns the app actually **searches by**: email at login, `short_code` and `custom_alias` on every redirect, owner on every list, `url_id` + date when counting clicks per day, tag name, and owner + URL when checking for duplicates.
+
+The duplicate rule indexes `md5(original_url)` (a 32-character fingerprint) instead of the URL itself, so the index stays small however long the URLs are.
 
 Migration 4 reshaped two of them to fit the real queries. They were measured with `EXPLAIN ANALYZE` on generated test data, comparing the old and new indexes:
 
@@ -299,6 +308,13 @@ A composite index still serves queries on its **first** column alone (like a pho
 | `top_urls` | links ordered by the stored `click_count`, `limit(5)` |
 | `clicks_last_7_days` | `group_by(func.date(Click.clicked_at))` over the last 7 days, joined to the owner's links |
 | `urls_per_tag` | `join` through `url_tags`, `group_by(Tag.name)` |
+| `clicks_per_ip_address` | `clicks_grouped_by(Click.ip_address)`, top 10; the last part of each IP is hidden before it is returned |
+| `clicks_per_user_agent` | `clicks_grouped_by(Click.user_agent)`, top 10 |
+| `clicks_per_country` | `clicks_grouped_by(Click.country)`, top 10 |
+| `clicks_per_city` | `group_by(Click.city, Click.country)`, top 10 (so two towns with the same name stay apart) |
+| `clicks_per_referrer` | `clicks_grouped_by(Click.referrer)`, top 10 |
+
+`clicks_grouped_by` is one reusable query, "count this user's clicks per value of a column, most first, top N": `select(column, count(Click.id)).join(Click.url).where(URL.user_id == ...).group_by(column).order_by(count desc).limit(N)`. Empty values come back as one group and are shown as "Unknown" (or "Direct" for the referrer).
 
 ---
 
@@ -314,7 +330,8 @@ url-shortener-microservice/
 │   ├── models.py           # User, URL, Click, Tag, url_tags
 │   ├── repositories.py     # UserRepository, TagRepository, URLRepository
 │   ├── security.py         # hash_password, verify_password
-│   ├── services.py         # UrlShortenerService (codes, aliases, visits)
+│   ├── services.py         # UrlShortenerService (codes, aliases, duplicates, visits)
+│   ├── geoip.py            # find_location(ip) → (country, city)
 │   ├── schemas.py          # Pydantic request / response / error models
 │   ├── dependencies.py     # get_db wiring, repositories, get_current_user
 │   ├── routes.py           # /auth, /api/urls, /api routes
@@ -322,7 +339,10 @@ url-shortener-microservice/
 │   └── middleware.py       # request logging middleware
 ├── alembic/
 │   ├── env.py              # reads DATABASE_URL, targets Base.metadata
-│   └── versions/           # the 7 migrations
+│   └── versions/           # the 8 migrations
+├── scripts/
+│   └── download_location_file.py   # downloads the IP location file into data/
+├── data/                   # IP location file (not in Git, see "Running the project")
 ├── alembic.ini
 ├── Dockerfile              # multi-stage production image (includes alembic)
 ├── docker-compose.yml      # development: app + PostgreSQL + hot reload
@@ -347,6 +367,7 @@ All settings come from environment variables. Locally they are read from a `.env
 | `POSTGRES_PASSWORD` | `change-me` | Its password |
 | `POSTGRES_DB` | `shortener` | Database created on first start |
 | `DATABASE_URL` | `postgresql+psycopg://shortener:change-me@127.0.0.1:5433/shortener` | Used by **local** tools (Alembic, scripts). Docker Compose builds its own URL for the API (`@db:5432`). Required: the app refuses to start without it. |
+| `GEOIP_DATABASE_PATH` | `data/dbip-city-lite.mmdb` | Optional. Where the IP location file is. If the file is missing, the app still runs and logs a warning; country and city stay empty. |
 
 `.env` is listed in `.gitignore`, so real secrets are never committed. Only `.env.example` is in the repository.
 
@@ -378,29 +399,43 @@ cp .env.example .env          # on Windows PowerShell: copy .env.example .env
 ```
 Open `.env` and set a real `POSTGRES_PASSWORD`, using the same value inside `DATABASE_URL`.
 
-### 2. Start the containers (development)
+### 2. Download the IP location file
+```bash
+python scripts/download_location_file.py
+```
+Expected:
+```
+Downloading https://download.db-ip.com/free/dbip-city-lite-2026-11.mmdb.gz ...
+Unpacking ...
+Saved data/dbip-city-lite.mmdb (121 MB, edition 2026-11)
+```
+The file (about 120 MB) is not in Git: GitHub refuses files over 100 MB, and a new edition comes out every month. The script needs only Python's built-in modules. Run it again later to refresh the data, then `docker compose restart api`. Without the file, everything still works, but visits have no country or city.
+
+IP Geolocation by [DB-IP](https://db-ip.com), licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+### 3. Start the containers (development)
 ```bash
 docker compose up --build -d
 docker compose ps
 ```
 Expected: `db` is `(healthy)` and `api` is `Up`.
 
-### 3. Create the tables (run the migrations)
+### 4. Create the tables (run the migrations)
 ```bash
 docker compose exec api alembic upgrade head
 ```
 Expected last line:
 ```
-INFO  [alembic.runtime.migration] Running upgrade 0c6a9ac83683 -> 6c4844556bc0, add visitor details to clicks
+INFO  [alembic.runtime.migration] Running upgrade 6c4844556bc0 -> 81f75907bc05, one link per url per user
 ```
-Check with `docker compose exec api alembic current`, which should print `6c4844556bc0 (head)`.
+Check with `docker compose exec api alembic current`, which should print `81f75907bc05 (head)`.
 
 - Swagger UI: http://127.0.0.1:8000/docs
 - Health check: http://127.0.0.1:8000/health → `{"status":"ok","env":"development"}`
 
 Edit any file in `app/` and save. The logs show `Reloading...` and the change is live, with no rebuild needed.
 
-### 4. Production profile
+### 5. Production profile
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
 docker compose exec api alembic upgrade head
@@ -449,14 +484,14 @@ Emails are stored in lowercase. Passwords are stored only as bcrypt hashes and a
 
 | Method and path | Auth | Success | Errors |
 |---|---|---|---|
-| `POST /api/shorten` | Basic | **201** a link (see below) | **401** · **409** custom alias already used · **422** invalid field |
+| `POST /api/shorten` | Basic | **201** a link (see below) | **401** · **409** you already shortened this URL (the answer names your existing link), or custom alias already used · **422** invalid field |
 | `GET /api/{code}` (short code **or** custom alias) | – (public) | **302** redirect; the visit is recorded and `click_count` goes up by 1 | **404** unknown code · **410** link switched off or expired (no visit recorded) |
 
 `POST /api/shorten` body:
 
 | Field | Required | Rules |
 |---|---|---|
-| `url` | yes | valid `http(s)` URL |
+| `url` | yes | valid `http(s)` URL; you can't shorten the same URL twice (other users can) |
 | `tags` | no | up to 10, each 1–50 characters |
 | `custom_alias` | no | 3–10 letters, digits, `-` or `_`; must not match any short code or alias; `urls` and `shorten` are reserved |
 | `title` / `description` / `favicon` | no | max 255 / 500 / 2048 characters |
@@ -469,14 +504,15 @@ Emails are stored in lowercase. Passwords are stored only as bcrypt hashes and a
 | `GET /api/urls?limit=20&offset=0` | Basic | **200** your links, newest first (`limit` 1–100) | **401** · **422** bad `limit` / `offset` |
 | `GET /api/urls/stats` | Basic | **200** stats (see below) | **401** |
 | `GET /api/urls/{id}` | Basic | **200** one link | **401** · **404** not found or not yours |
-| `PATCH /api/urls/{id}` | Basic | **200** the updated link | **401** · **404** · **409** alias taken · **422** |
+| `PATCH /api/urls/{id}` | Basic | **200** the updated link | **400** nothing sent, or nothing would change · **401** · **404** · **409** alias taken, or you already have a link for the new URL · **422** |
 | `DELETE /api/urls/{id}` | Basic | **204** (its clicks and tag links are deleted too) | **401** · **404** |
 
 `PATCH` only changes the fields you send:
 - **leave a field out** to keep it,
 - send **`null`** to clear an optional field (`custom_alias`, `title`, `description`, `favicon`, `expires_at`),
 - `url`, `tags` and `is_active` can't be `null`; `"tags": []` removes all tags, and a new list replaces the old one,
-- `"is_active": false` switches the link off (it answers **410**); `true` switches it back on.
+- `"is_active": false` switches the link off (it answers **410**); `true` switches it back on,
+- only fields whose value really differs are saved. An empty body `{}` answers **400** "Send at least one field to update", and a body whose values all equal the current ones answers **400** "Nothing to update". Tags are compared after tidying, in any order.
 
 A link looks like:
 ```json
@@ -498,16 +534,24 @@ A link looks like:
 }
 ```
 
-Stats look like:
+Stats look like this (lists shortened):
 ```json
 {
   "total_urls": 2,
-  "total_clicks": 24,
-  "top_urls": [{"short_code": "2RwOrg", "original_url": "https://b.com/", "clicks": 21}],
-  "clicks_last_7_days": [{"day": "2026-11-19", "clicks": 24}],
-  "urls_per_tag": [{"tag": "shopping", "urls": 2}, {"tag": "books", "urls": 1}]
+  "total_clicks": 7,
+  "top_urls": [{"short_code": "GoDhSr", "original_url": "https://a.com/", "clicks": 4}],
+  "clicks_last_7_days": [{"day": "2026-11-20", "clicks": 7}],
+  "urls_per_tag": [{"tag": "work", "urls": 1}],
+  "clicks_per_ip_address": [{"ip_address": "196.216.180.xxx", "clicks": 2}, {"ip_address": "102.176.65.xxx", "clicks": 1}],
+  "clicks_per_user_agent": [{"user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/142.0 ...", "clicks": 4}],
+  "clicks_per_country": [{"country": "Ghana", "clicks": 4}, {"country": "Unknown", "clicks": 1}],
+  "clicks_per_city": [{"city": "Accra (Osu Klottey)", "country": "Ghana", "clicks": 3}, {"city": "Kumasi", "country": "Ghana", "clicks": 1}],
+  "clicks_per_referrer": [{"referrer": "Direct", "clicks": 3}, {"referrer": "https://twitter.com/ama/status/1", "clicks": 2}]
 }
 ```
+- The five `clicks_per_...` lists show the **top 10**, most visits first, for **your links only**.
+- **IP addresses are partly hidden** in stats (`196.216.180.xxx`, or the second half of an IPv6 address) to protect visitors; the full address stays in the database. Two different visitors on the same network can therefore appear as two rows with the same hidden address.
+- Empty values are grouped as **"Unknown"** (user agent, country, city) or **"Direct"** (referrer: the link was typed or pasted).
 
 Tags are trimmed, lowercased and de-duplicated (`[" Shopping", "shopping"]` → `["shopping"]`). Tag names are shared between users: there is one `shopping` row in `tags`.
 
@@ -520,7 +564,9 @@ Each successful redirect saves one row in `clicks`:
 | `ip_address` | the connection (`request.client.host`); anything that isn't a valid IP is saved as `0.0.0.0` |
 | `user_agent` | the `User-Agent` header (empty if missing) |
 | `referrer` | the `Referer` header (null if missing) |
-| `city`, `country` | not filled yet (no location lookup) |
+| `city`, `country` | looked up from the IP in the offline DB-IP City Lite file ([app/geoip.py](app/geoip.py)); empty when the IP isn't in it |
+
+**Why local tests show "Unknown" for country and city.** When you test from Swagger on your own machine, the request never goes over the internet: Docker forwards it to the API, so the API sees Docker's own **private** address (e.g. `172.18.0.1`). Private addresses are used by millions of networks and belong to no place, so no location file can place them. Real countries and cities appear once the app runs on a server and visitors arrive from **public** IPs. The lookup itself was checked with public IPs (e.g. `102.176.65.1` → Ghana, Kumasi; `8.8.8.8` → United States, Mountain View). City-level results are approximate.
 
 ### `GET /health`
 
@@ -583,16 +629,16 @@ Click **Authorize** and enter `ama@mail.com` / `secret123`. Call **POST /auth/lo
 ```json
 { "url": "https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702", "tags": ["shopping", "books"] }
 ```
-→ **201** each time. Try the alias `my-cv` again → **409**. Log out of Swagger and try again → **401**.
+→ **201** each time. Try the alias `my-cv` again → **409**. Shorten `https://www.python.org` again → **409** "You already shortened this URL: …". Log out of Swagger and try again → **401**.
 
 ### 5. Open the links
 Paste a `short_url` **and** the `alias_url` into the **browser's address bar** (Swagger cannot follow redirects to other websites). Both redirect.
-**Show:** each visit adds a row to `clicks` (IP, browser, referrer), and `click_count` on the link goes up.
+**Show:** each visit adds a row to `clicks` (IP, browser, referrer, country, city), and `click_count` on the link goes up. Locally, country and city are empty: see [why](#what-a-visit-records).
 
 ### 6. Manage the links
 - **GET /api/urls**: both links, newest first, with `tags` and `click_count`.
-- **PATCH /api/urls/{id}** with `{"tags": ["work"]}`: only the tags change.
-- **GET /api/urls/stats**: totals, top links, clicks per day, links per tag.
+- **PATCH /api/urls/{id}** with `{"tags": ["work"]}`: only the tags change. Send the same body again → **400** "Nothing to update". Send `{}` → **400** "Send at least one field to update".
+- **GET /api/urls/stats**: totals, top links, clicks per day, links per tag, and the top IPs (partly hidden), browsers, countries, cities and referrers.
 
 ### 7. Switch off and expire
 - **PATCH** `{"is_active": false}` → opening the link gives **410**, and `click_count` doesn't change. **PATCH** `{"is_active": true}` → it works again.
@@ -606,9 +652,9 @@ As Ama, **DELETE /api/urls/{id}** → **204**. **Show:** its rows in `clicks` an
 
 ### 10. Migrations
 ```bash
-docker compose exec api alembic downgrade -1    # removes the visitor details from clicks
-docker compose exec api alembic upgrade head    # and adds them back
-docker compose exec api alembic current         # 6c4844556bc0 (head)
+docker compose exec api alembic downgrade -1    # removes the one-link-per-URL rule
+docker compose exec api alembic upgrade head    # and adds it back
+docker compose exec api alembic current         # 81f75907bc05 (head)
 ```
 
 ### 11. Production profile
@@ -641,8 +687,17 @@ Django's `choices` and `PositiveIntegerField` become `CHECK` constraints, and `G
 **404 vs 410 on redirect.**
 `404` means the code was never known. `410 Gone` means the link exists but is switched off or expired. Neither records a visit.
 
-**Updates that tell "left out" from "null".**
-`PATCH` uses Pydantic's `exclude_unset`, so a field that isn't sent is kept, while `null` clears it. This is needed to remove an alias or an expiry date.
+**Updates that tell "left out" from "null", and say when nothing changes.**
+`PATCH` uses Pydantic's `exclude_unset`, so a field that isn't sent is kept, while `null` clears it. This is needed to remove an alias or an expiry date. The sent values are then compared with the stored ones, and only real differences are saved. If there are none, the answer is **400** instead of a misleading **200**.
+
+**One link per URL per user.**
+Shortening a URL you already have answers **409** and names your existing link, instead of creating a second code for the same page. The app checks first, and the unique index on `(user_id, md5(original_url))` is the final guarantee: tested with 5 identical requests at once, one link was created and four got **409**. When the database refuses a save, the app reads which rule refused it, so a duplicate URL and a taken alias get the right message.
+
+**Offline location lookup.**
+Country and city come from a local file (DB-IP City Lite, read with `maxminddb`), not from an online service: visitors' IPs never leave the server, there's no rate limit, and a lookup takes about 0.02 ms. The file is opened once at startup and refreshed monthly with `scripts/download_location_file.py`.
+
+**IP addresses partly hidden in stats.**
+An IP address is personal data about the **visitor**, and the stats are read by the **link owner**, a different person. Following least privilege and data minimisation, stats show `196.216.180.xxx`, which is enough to spot repeated visits from one network. The full address stays stored for the service itself.
 
 **HTTP Basic auth for this module.**
 It's the simplest correct option: no extra package, no extra table. All authorization goes through one dependency, `get_current_user`, so switching to JWT next module changes only that function. The routes stay the same.
@@ -668,7 +723,9 @@ Three handlers in [app/errors.py](app/errors.py) cover HTTP errors, validation e
 
 - **Basic auth** sends the password on every request and checks it with bcrypt each time (slow on purpose). It's fine for this module, and it's replaced by JWT in the next one.
 - **Visitor IP behind Docker or a proxy:** the app sees the address of whatever is directly in front of it. In local Docker that is the Docker network gateway (e.g. `172.18.0.1`), not the real visitor. Behind a trusted reverse proxy, the real IP would be read from `X-Forwarded-For`.
-- **Not filled automatically:** `city` and `country` need a geo-IP lookup, and `title`, `description` and `favicon` would need the target page to be fetched. They can be set by the owner (link details) or stay empty (click location).
+- **Location data:** the IP location file must be downloaded separately and refreshed monthly; city results are approximate, and private IPs (all local tests) are "Unknown".
+- **Not filled automatically:** `title`, `description` and `favicon` would need the target page to be fetched; the owner can set them.
+- **URL spelling:** duplicates are detected on the URL as normalised by Pydantic (for example `https://python.org` and `https://python.org/` are the same), but not across other spellings such as `http://` vs `https://`, `www.` or extra query parameters. The database rule compares an `md5` fingerprint; two different URLs with the same fingerprint are practically impossible, but would be treated as duplicates.
 - **`tier` and `is_premium`** are stored and returned, but no feature depends on them yet (for example, custom aliases for premium users only).
 - **Alias vs short code at the same instant:** aliases are unique among aliases, and codes among codes (unique indexes). An alias matching another link's **short code** is checked by the app, so two requests at exactly the same moment could in theory get past that check.
 - **New tag race:** if two requests create the same **new** tag name at exactly the same moment, the second one can fail on the unique index. PostgreSQL's `INSERT ... ON CONFLICT DO NOTHING` would remove this.
