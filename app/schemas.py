@@ -1,7 +1,60 @@
+import ipaddress
 from datetime import date, datetime
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, FutureDatetime, HttpUrl
+from pydantic import AfterValidator, BaseModel, BeforeValidator, ConfigDict, EmailStr, Field, FutureDatetime, HttpUrl
+
+from app.config import BASE_URL
+
+# ---------- URL clean-up (used for the long URL on create and update) ----------
+
+MAX_URL_LENGTH = 2048
+LOCAL_HOST_ENDINGS = (".localhost", ".local", ".internal")
+
+
+def strip_spaces(value):
+    # "  https://python.org  " -> "https://python.org"
+    if isinstance(value, str):
+        return value.strip()
+    return value
+
+
+def our_own_host_and_port() -> tuple[str | None, int]:
+    parts = urlsplit(BASE_URL)
+    port = parts.port
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    return parts.hostname, port
+
+
+def check_safe_url(url: HttpUrl) -> HttpUrl:
+    # HttpUrl already made sure it is a well-formed http:// or https:// address
+    if len(str(url)) > MAX_URL_LENGTH:
+        raise ValueError(f"URL is too long (max {MAX_URL_LENGTH} characters)")
+
+    if url.username or url.password:
+        raise ValueError("URLs with a username or password inside are not allowed")
+
+    host = (url.host or "").strip("[]").lower()  # IPv6 hosts come as [::1]
+    if (host, url.port) == our_own_host_and_port():
+        raise ValueError("You cannot shorten one of our own short links")
+
+    if host == "localhost" or host.endswith(LOCAL_HOST_ENDINGS):
+        raise ValueError("Local addresses are not allowed")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return url  # a normal domain name like python.org
+    if not ip.is_global or ip.is_multicast:
+        # private (192.168.x.x, 10.x.x.x), loopback (127.0.0.1, ::1), link-local and other special ranges
+        raise ValueError("Private or local IP addresses are not allowed")
+    return url
+
+
+# An http(s) URL that is trimmed, then checked by check_safe_url
+SafeHttpUrl = Annotated[HttpUrl, BeforeValidator(strip_spaces), AfterValidator(check_safe_url)]
 
 TagName = Annotated[str, Field(min_length=1, max_length=50)]
 # 3 to 10 characters: letters, digits, "-" and "_" only (it becomes part of a web address)
@@ -22,7 +75,7 @@ class ShortenRequest(BaseModel):
         }
     )
 
-    url: HttpUrl = Field(
+    url: SafeHttpUrl = Field(
         description="The long URL to shorten. Must start with http:// or https://",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
     )
@@ -54,7 +107,7 @@ class URLUpdate(BaseModel):
     # Leave a field out to keep its current value.
     # For optional fields (alias, title, description, favicon, expires_at), send null to clear them.
     # url, tags and is_active cannot be null, so their default is None only to mean "not sent".
-    url: HttpUrl = Field(default=None, description="The new long URL", examples=["https://www.python.org"])
+    url: SafeHttpUrl = Field(default=None, description="The new long URL", examples=["https://www.python.org"])
     tags: list[TagName] = Field(
         default=None,
         max_length=10,

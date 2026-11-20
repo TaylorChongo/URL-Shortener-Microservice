@@ -29,7 +29,9 @@ def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse
 def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     errors = []
     for error in exc.errors():
-        errors.append({"field": error["loc"][-1], "message": error["msg"]})
+        # our own checks raise ValueError, which Pydantic shows as "Value error, <message>"
+        message = error["msg"].removeprefix("Value error, ")
+        errors.append({"field": error["loc"][-1], "message": message})
 
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
