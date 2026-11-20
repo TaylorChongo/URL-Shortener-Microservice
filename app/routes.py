@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.exc import IntegrityError
 
-from app.config import ACCESS_TOKEN_MINUTES, BASE_URL
+from app.config import ACCESS_TOKEN_MINUTES, BASE_URL, LOGIN_RATE_LIMIT
 from app.dependencies import (
     get_current_user,
     get_shortener_service,
@@ -17,6 +17,7 @@ from app.dependencies import (
     require_premium,
 )
 from app.models import URL, Click, User
+from app.rate_limit import limiter
 from app.repositories import TagRepository, URLRepository, UserRepository, clean_tag_names
 from app.schemas import (
     AccessTokenResponse,
@@ -191,14 +192,18 @@ def register(
         "Send your email (in the 'username' field, as the OAuth2 standard names it) and your password "
         "as form data. You get an access token (valid 30 minutes) to send with every request, and a "
         "refresh token (valid 7 days) to get new access tokens. In Swagger, use the 'Authorize' button: "
-        "it logs in through this endpoint and keeps the token for you."
+        "it logs in through this endpoint and keeps the token for you. "
+        "At most 5 attempts per minute from the same address (then 429)."
     ),
     responses={
         401: {"model": ErrorResponse, "description": "The email or password is incorrect"},
         403: {"model": ErrorResponse, "description": "The account is disabled"},
+        429: {"model": ErrorResponse, "description": "Too many login attempts: wait a minute"},
     },
 )
+@limiter.limit(LOGIN_RATE_LIMIT)  # counts every attempt, right or wrong, per visitor address
 def login(
+    request: Request,  # slowapi reads the visitor's address from it
     form: OAuth2PasswordRequestForm = Depends(),
     users: UserRepository = Depends(get_user_repository),
 ) -> TokenResponse:

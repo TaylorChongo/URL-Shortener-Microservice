@@ -2,16 +2,19 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.exceptions import RequestValidationError
+from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.config import APP_ENV, DEBUG
 from app.errors import (
     http_exception_handler,
+    rate_limit_handler,
     unexpected_exception_handler,
     validation_exception_handler,
 )
 from app.middleware import log_requests
+from app.rate_limit import limiter
 from app.routes import admin_router, analytics_router, auth_router, redirect_router, urls_router
 
 
@@ -29,7 +32,11 @@ def create_app() -> FastAPI:
 
     app.add_exception_handler(StarletteHTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
+    app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
     app.add_exception_handler(Exception, unexpected_exception_handler)
+
+    # slowapi looks for the limiter here
+    app.state.limiter = limiter
 
     @app.get("/health", tags=["health"], summary="Check that the service is running")
     def health():

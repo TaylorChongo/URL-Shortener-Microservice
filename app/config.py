@@ -10,3 +10,6 @@ GEOIP_DATABASE_PATH = config("GEOIP_DATABASE_PATH", default="data/dbip-city-lite
 JWT_SECRET_KEY = config("JWT_SECRET_KEY")
 ACCESS_TOKEN_MINUTES = config("ACCESS_TOKEN_MINUTES", default=30, cast=int)
 REFRESH_TOKEN_DAYS = config("REFRESH_TOKEN_DAYS", default=7, cast=int)
+
+# how many login attempts one address may make, e.g. "5/minute"
+LOGIN_RATE_LIMIT = config("LOGIN_RATE_LIMIT", default="5/minute")

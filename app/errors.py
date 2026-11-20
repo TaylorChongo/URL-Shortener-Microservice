@@ -3,6 +3,7 @@ import logging
 from fastapi import Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from slowapi.errors import RateLimitExceeded
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 logger = logging.getLogger(__name__)
@@ -13,6 +14,15 @@ def http_exception_handler(request: Request, exc: StarletteHTTPException) -> JSO
         status_code=exc.status_code,
         content={"status_code": exc.status_code, "message": exc.detail},
         headers=exc.headers,
+    )
+
+
+def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    # same error format as everywhere else; Retry-After = the longest wait, one full window (a minute)
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"status_code": 429, "message": f"Too many attempts ({exc.detail}): try again in a minute"},
+        headers={"Retry-After": "60"},
     )
 
 

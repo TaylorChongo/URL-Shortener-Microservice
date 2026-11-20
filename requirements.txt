@@ -8,3 +8,4 @@ psycopg[binary]==3.3.9 # Postgres driver
 pwdlib[bcrypt]==0.3.1
 maxminddb==3.3.0 # reads the IP location file
 pyjwt==2.15.1 # creates and checks the JWT tokens
+slowapi==0.1.10 # rate limiting (login attempts)
