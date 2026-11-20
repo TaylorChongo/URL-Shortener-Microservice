@@ -58,6 +58,11 @@ class URL(Base):
     tags: Mapped[list["Tag"]] = relationship(secondary=url_tags, back_populates="urls")
 
 
+# One user cannot shorten the same URL twice (different users can).
+# The index stores md5(original_url), a short fingerprint, so it stays small even for very long URLs.
+Index("uq_urls_user_id_original_url", URL.user_id, func.md5(URL.original_url), unique=True)
+
+
 class Click(Base):
     __tablename__ = "clicks"
     # "clicks of these links (since a date)": filter by url_id, then by clicked_at
