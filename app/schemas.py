@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, FutureDatetime, HttpUrl
 
@@ -162,6 +162,16 @@ class UserRead(BaseModel):
     is_premium: bool = Field(examples=[False])
     tier: str = Field(description="Account level: free, premium or admin", examples=["free"])
     created_at: datetime
+
+
+class AdminUserUpdate(BaseModel):
+    # Leave a field out to keep it. Neither field can be null.
+    model_config = ConfigDict(json_schema_extra={"examples": [{"tier": "premium"}]})
+
+    tier: Literal["free", "premium", "admin"] = Field(
+        default=None, description="New account level. is_premium is set automatically (true for premium and admin)."
+    )
+    is_active: bool = Field(default=None, description="false disables the account: it can no longer log in")
 
 
 class TokenResponse(BaseModel):

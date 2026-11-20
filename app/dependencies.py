@@ -55,3 +55,10 @@ def get_current_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled")
 
     return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    # guard for admin-only routes: logged in (checked by get_current_user) AND tier "admin"
+    if current_user.tier != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admins only")
+    return current_user

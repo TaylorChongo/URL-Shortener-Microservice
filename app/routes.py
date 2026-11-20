@@ -13,11 +13,13 @@ from app.dependencies import (
     get_tag_repository,
     get_url_repository,
     get_user_repository,
+    require_admin,
 )
 from app.models import URL, Click, User
 from app.repositories import TagRepository, URLRepository, UserRepository, clean_tag_names
 from app.schemas import (
     AccessTokenResponse,
+    AdminUserUpdate,
     CityCount,
     CountryCount,
     DayClicks,
@@ -125,7 +127,12 @@ def visitor_ip(request: Request) -> str:
 
 
 def get_own_url_or_404(urls: URLRepository, user: User, short_code: str) -> URL:
-    url = urls.get_for_user(user_id=user.id, code=short_code)
+    # Admins may reach any user's link. Everyone else only finds their own:
+    # someone else's link looks exactly like a link that does not exist (404).
+    if user.tier == "admin":
+        url = urls.get_by_code(short_code)
+    else:
+        url = urls.get_for_user(user_id=user.id, code=short_code)
     if url is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="URL not found")
     return url
@@ -424,7 +431,7 @@ def update_url(
         new_tags = tags.get_or_create(body.tags)
 
     if "original_url" in changes:
-        existing = urls.get_user_link_for_url(current_user.id, changes["original_url"])
+        existing = urls.get_user_link_for_url(url.user_id, changes["original_url"])
         if existing is not None:
             raise_already_shortened(existing)
 
@@ -467,6 +474,76 @@ def delete_url(
         urls.update(url, changes={"is_active": False}, tags=None)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- /api/v1/admin (admins only) ----------
+# Every route in this router goes through require_admin first: not an admin -> 403.
+
+admin_router = APIRouter(prefix=f"{API_PREFIX}/admin", tags=["admin"])
+ADMINS_ONLY = {403: {"model": ErrorResponse, "description": "You are not an admin"}}
+
+
+@admin_router.get(
+    "/users",
+    response_model=list[UserRead],
+    summary="List all users (admins only)",
+    responses={**NOT_LOGGED_IN, **ADMINS_ONLY},
+)
+def list_users(
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    admin: User = Depends(require_admin),
+    users: UserRepository = Depends(get_user_repository),
+) -> list[UserRead]:
+    return users.list_all(limit=limit, offset=offset)
+
+
+@admin_router.patch(
+    "/users/{user_id}",
+    response_model=UserRead,
+    summary="Change a user's tier or switch their account on/off (admins only)",
+    description=(
+        "Send tier (free, premium or admin) and/or is_active. is_premium follows the tier automatically. "
+        "An admin cannot demote or disable their own account, so the system always keeps an admin."
+    ),
+    responses={
+        400: {"model": ErrorResponse, "description": "Nothing to change, or you tried to demote/disable yourself"},
+        **NOT_LOGGED_IN,
+        **ADMINS_ONLY,
+        404: {"model": ErrorResponse, "description": "No user with this id"},
+    },
+)
+def update_user(
+    user_id: int,
+    body: AdminUserUpdate,
+    admin: User = Depends(require_admin),
+    users: UserRepository = Depends(get_user_repository),
+) -> UserRead:
+    user = users.get_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    if not body.model_fields_set:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send tier and/or is_active")
+
+    # keep only the values that really differ from what is stored now
+    changes = {}
+    for field_name, value in body.model_dump(exclude_unset=True).items():
+        if getattr(user, field_name) != value:
+            changes[field_name] = value
+    if not changes:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nothing to update: the values you sent are the same as the current ones",
+        )
+
+    if user.id == admin.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="You cannot change your own tier or disable your own account",
+        )
+
+    return users.update(user, changes)
 
 
 # ---------- /{short_code}: the public redirect ----------

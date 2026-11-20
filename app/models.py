@@ -6,6 +6,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
 
+# The three account levels (roles). The database CHECK rule on users.tier allows only these.
+TIERS = ("free", "premium", "admin")
+
 url_tags = Table(
     "url_tags",
     Base.metadata,

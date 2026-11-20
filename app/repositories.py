@@ -22,6 +22,20 @@ class UserRepository:
         self.db.commit()
         return user
 
+    def list_all(self, limit: int, offset: int) -> list[User]:
+        statement = select(User).order_by(User.id).limit(limit).offset(offset)
+        return list(self.db.scalars(statement))
+
+    def update(self, user: User, changes: dict) -> User:
+        # changes only holds the fields to change, e.g. {"tier": "premium"} or {"is_active": False}
+        if "tier" in changes:
+            # is_premium always follows the tier, so the two can never disagree
+            changes["is_premium"] = changes["tier"] != "free"
+        for field_name, value in changes.items():
+            setattr(user, field_name, value)
+        self.db.commit()
+        return user
+
 
 def clean_tag_names(names: list[str]) -> list[str]:
     # " Shopping", "shopping" -> ["shopping"]: trimmed, lowercase, no repeats
