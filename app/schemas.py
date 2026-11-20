@@ -9,6 +9,19 @@ CustomAlias = Annotated[str, Field(min_length=3, max_length=10, pattern=r"^[A-Za
 
 
 class ShortenRequest(BaseModel):
+    # The body Swagger pre-fills in "Try it out": short and valid, so "Execute" works straight away.
+    # The optional fields are still listed in the schema below it.
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "url": "https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702",
+                    "tags": ["books"],
+                }
+            ]
+        }
+    )
+
     url: HttpUrl = Field(
         description="The long URL to shorten. Must start with http:// or https://",
         examples=["https://www.amazon.com/Python-Crash-Course-3rd-Edition/dp/1718502702"],
@@ -30,10 +43,14 @@ class ShortenRequest(BaseModel):
     expires_at: FutureDatetime | None = Field(
         default=None,
         description="When the link stops working (must be in the future). Leave it out for a link that never expires.",
+        examples=["2030-01-01T00:00:00Z"],
     )
 
 
 class URLUpdate(BaseModel):
+    # The body Swagger pre-fills in "Try it out": change just the title and the tags.
+    model_config = ConfigDict(json_schema_extra={"examples": [{"title": "My new title", "tags": ["learning"]}]})
+
     # Leave a field out to keep its current value.
     # For optional fields (alias, title, description, favicon, expires_at), send null to clear them.
     # url, tags and is_active cannot be null, so their default is None only to mean "not sent".
@@ -49,7 +66,11 @@ class URLUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=255)
     description: str | None = Field(default=None, max_length=500)
     favicon: str | None = Field(default=None, max_length=2048)
-    expires_at: FutureDatetime | None = Field(default=None, description="Send null to remove the expiry date")
+    expires_at: FutureDatetime | None = Field(
+        default=None,
+        description="Must be in the future. Send null to remove the expiry date.",
+        examples=["2030-01-01T00:00:00Z"],
+    )
 
 
 class URLResponse(BaseModel):
