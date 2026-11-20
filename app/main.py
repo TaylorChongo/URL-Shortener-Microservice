@@ -12,7 +12,7 @@ from app.errors import (
     validation_exception_handler,
 )
 from app.middleware import log_requests
-from app.routes import admin_router, auth_router, redirect_router, urls_router
+from app.routes import admin_router, analytics_router, auth_router, redirect_router, urls_router
 
 
 def create_app() -> FastAPI:
@@ -37,6 +37,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth_router)
     app.include_router(urls_router)
+    app.include_router(analytics_router)
     app.include_router(admin_router)
     # the redirect (/{code}) catches any single-word address, so it must come last,
     # after /health and the /api/v1 routes (/docs and /openapi.json are added by FastAPI first)

@@ -141,11 +141,26 @@ class StatsResponse(BaseModel):
     top_urls: list[TopURL]
     clicks_last_7_days: list[DayClicks]
     urls_per_tag: list[TagCount]
-    clicks_per_ip_address: list[IPAddressCount]
-    clicks_per_user_agent: list[UserAgentCount]
+    # the visitor lists below are a Premium feature: null for free accounts
+    detailed_analytics: bool = Field(description="true for premium and admin accounts: the visitor lists below are filled")
+    clicks_per_ip_address: list[IPAddressCount] | None = None
+    clicks_per_user_agent: list[UserAgentCount] | None = None
+    clicks_per_country: list[CountryCount] | None = None
+    clicks_per_city: list[CityCount] | None = None
+    clicks_per_referrer: list[ReferrerCount] | None = None
+
+
+class LinkAnalyticsResponse(BaseModel):
+    short_code: str = Field(examples=["aB3xY9"])
+    original_url: str = Field(examples=["https://www.python.org/"])
+    total_clicks: int = Field(examples=[42])
+    days: int = Field(description="How many days clicks_per_day covers", examples=[30])
+    clicks_per_day: list[DayClicks] = Field(description="One entry per day, oldest first, including days with 0 clicks")
     clicks_per_country: list[CountryCount]
     clicks_per_city: list[CityCount]
     clicks_per_referrer: list[ReferrerCount]
+    clicks_per_user_agent: list[UserAgentCount]
+    clicks_per_ip_address: list[IPAddressCount]
 
 
 class UserCreate(BaseModel):

@@ -57,6 +57,13 @@ def get_current_user(
     return user
 
 
+def require_premium(current_user: User = Depends(get_current_user)) -> User:
+    # guard for premium features: tier "premium" or "admin"
+    if current_user.tier == "free":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Detailed analytics are a Premium feature")
+    return current_user
+
+
 def require_admin(current_user: User = Depends(get_current_user)) -> User:
     # guard for admin-only routes: logged in (checked by get_current_user) AND tier "admin"
     if current_user.tier != "admin":

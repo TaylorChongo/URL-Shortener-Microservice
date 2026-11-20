@@ -1,5 +1,5 @@
 import ipaddress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
@@ -14,6 +14,7 @@ from app.dependencies import (
     get_url_repository,
     get_user_repository,
     require_admin,
+    require_premium,
 )
 from app.models import URL, Click, User
 from app.repositories import TagRepository, URLRepository, UserRepository, clean_tag_names
@@ -25,6 +26,7 @@ from app.schemas import (
     DayClicks,
     ErrorResponse,
     IPAddressCount,
+    LinkAnalyticsResponse,
     ReferrerCount,
     RefreshRequest,
     ShortenRequest,
@@ -305,6 +307,32 @@ def list_urls(
     return [to_url_response(url) for url in page]
 
 
+def visitor_lists(urls: URLRepository, user_id: int | None = None, url_id: int | None = None) -> dict:
+    # The 5 "top 10 visitors by ..." lists, for all of a user's links (user_id) or for one link (url_id)
+    return {
+        "clicks_per_ip_address": [
+            IPAddressCount(ip_address=hide_ip(row.value), clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.ip_address, limit=TOP, url_id=url_id)
+        ],
+        "clicks_per_user_agent": [
+            UserAgentCount(user_agent=row.value or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.user_agent, limit=TOP, url_id=url_id)
+        ],
+        "clicks_per_country": [
+            CountryCount(country=row.value or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.country, limit=TOP, url_id=url_id)
+        ],
+        "clicks_per_city": [
+            CityCount(city=row.city or "Unknown", country=row.country or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_per_city(user_id, limit=TOP, url_id=url_id)
+        ],
+        "clicks_per_referrer": [
+            ReferrerCount(referrer=row.value or "Direct", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.referrer, limit=TOP, url_id=url_id)
+        ],
+    }
+
+
 # /stats must be declared before /{short_code}, or "stats" would be read as a short code
 @urls_router.get(
     "/stats",
@@ -312,8 +340,9 @@ def list_urls(
     summary="Statistics about your URLs",
     description=(
         "Login required. Totals across all your links: how many links and clicks you have, "
-        "your 5 most clicked links, clicks per day for the last 7 days, how many links use each tag, "
-        "and the top 10 visitors' IP addresses (partly hidden), user agents, countries, cities and referrers."
+        "your 5 most clicked links, clicks per day for the last 7 days and how many links use each tag. "
+        "Premium and admin accounts also get the top 10 visitors' IP addresses (partly hidden), "
+        "user agents, countries, cities and referrers; for free accounts these are null."
     ),
     responses={**NOT_LOGGED_IN},
 )
@@ -322,6 +351,12 @@ def get_stats(
     urls: URLRepository = Depends(get_url_repository),
 ) -> StatsResponse:
     user_id = current_user.id
+    detailed = current_user.tier != "free"
+
+    details = {}
+    if detailed:
+        details = visitor_lists(urls, user_id=user_id)
+
     return StatsResponse(
         total_urls=urls.count_urls(user_id),
         total_clicks=urls.count_clicks(user_id),
@@ -331,26 +366,8 @@ def get_stats(
         ],
         clicks_last_7_days=[DayClicks(day=row.day, clicks=row.clicks) for row in urls.clicks_per_day(user_id, days=7)],
         urls_per_tag=[TagCount(tag=row.name, urls=row.urls) for row in urls.urls_per_tag(user_id)],
-        clicks_per_ip_address=[
-            IPAddressCount(ip_address=hide_ip(row.value), clicks=row.clicks)
-            for row in urls.clicks_grouped_by(user_id, Click.ip_address, limit=TOP)
-        ],
-        clicks_per_user_agent=[
-            UserAgentCount(user_agent=row.value or "Unknown", clicks=row.clicks)
-            for row in urls.clicks_grouped_by(user_id, Click.user_agent, limit=TOP)
-        ],
-        clicks_per_country=[
-            CountryCount(country=row.value or "Unknown", clicks=row.clicks)
-            for row in urls.clicks_grouped_by(user_id, Click.country, limit=TOP)
-        ],
-        clicks_per_city=[
-            CityCount(city=row.city or "Unknown", country=row.country or "Unknown", clicks=row.clicks)
-            for row in urls.clicks_per_city(user_id, limit=TOP)
-        ],
-        clicks_per_referrer=[
-            ReferrerCount(referrer=row.value or "Direct", clicks=row.clicks)
-            for row in urls.clicks_grouped_by(user_id, Click.referrer, limit=TOP)
-        ],
+        detailed_analytics=detailed,
+        **details,
     )
 
 
@@ -503,6 +520,55 @@ def delete_url(
         urls.update(url, changes={"is_active": False}, tags=None)
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------- /api/v1/analytics (premium and admin only) ----------
+
+analytics_router = APIRouter(prefix=f"{API_PREFIX}/analytics", tags=["analytics"])
+
+
+@analytics_router.get(
+    "/{short_code}",
+    response_model=LinkAnalyticsResponse,
+    summary="Detailed analytics for one of your links (Premium)",
+    description=(
+        "Premium and admin accounts only. Use the link's short code (or alias). Visits per day "
+        "(oldest first, days with no visits included as 0) and the top 10 countries, cities, "
+        "referrers, user agents and IP addresses (partly hidden). "
+        "Locally, country and city are 'Unknown': Docker's private address has no location."
+    ),
+    responses={
+        **NOT_LOGGED_IN,
+        403: {"model": ErrorResponse, "description": "Detailed analytics are a Premium feature"},
+        **NOT_FOUND,
+    },
+)
+def link_analytics(
+    short_code: str,
+    days: int = Query(default=30, ge=1, le=365, description="How many days of visits per day to show"),
+    current_user: User = Depends(require_premium),
+    urls: URLRepository = Depends(get_url_repository),
+) -> LinkAnalyticsResponse:
+    url = get_own_url_or_404(urls, current_user, short_code)
+
+    # one entry for every day of the period, so a chart has no gaps
+    counts_by_day = {}
+    for row in urls.clicks_per_day(None, days=days, url_id=url.id):
+        counts_by_day[row.day] = row.clicks
+    today = datetime.now(timezone.utc).date()
+    clicks_per_day = []
+    for days_ago in range(days - 1, -1, -1):
+        day = today - timedelta(days=days_ago)
+        clicks_per_day.append(DayClicks(day=day, clicks=counts_by_day.get(day, 0)))
+
+    return LinkAnalyticsResponse(
+        short_code=url.short_code,
+        original_url=url.original_url,
+        total_clicks=url.click_count,
+        days=days,
+        clicks_per_day=clicks_per_day,
+        **visitor_lists(urls, url_id=url.id),
+    )
 
 
 # ---------- /api/v1/admin (admins only) ----------

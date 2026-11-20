@@ -181,16 +181,18 @@ class URLRepository:
         )
         return list(self.db.execute(statement))
 
-    def clicks_per_day(self, user_id: int, days: int) -> list:
+    def only_these_clicks(self, statement, user_id: int | None, url_id: int | None):
+        # The click statistics work for all of one user's links (user_id)
+        # or for a single link (url_id). One link needs no join: clicks.url_id is enough.
+        if url_id is not None:
+            return statement.where(Click.url_id == url_id)
+        return statement.join(Click.url).where(URL.user_id == user_id)
+
+    def clicks_per_day(self, user_id: int | None, days: int, url_id: int | None = None) -> list:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         day = func.date(Click.clicked_at).label("day")
-        statement = (
-            select(day, func.count(Click.id).label("clicks"))
-            .join(Click.url)
-            .where(URL.user_id == user_id, Click.clicked_at >= since)
-            .group_by(day)
-            .order_by(day)
-        )
+        statement = select(day, func.count(Click.id).label("clicks")).where(Click.clicked_at >= since)
+        statement = self.only_these_clicks(statement, user_id, url_id).group_by(day).order_by(day)
         return list(self.db.execute(statement))
 
     def urls_per_tag(self, user_id: int) -> list:
@@ -205,27 +207,25 @@ class URLRepository:
         )
         return list(self.db.execute(statement))
 
-    def clicks_grouped_by(self, user_id: int, column, limit: int) -> list:
-        # "count this user's clicks per value of <column>, most first"
+    def clicks_grouped_by(self, user_id: int | None, column, limit: int, url_id: int | None = None) -> list:
+        # "count the clicks per value of <column>, most first" (for a user's links, or one link)
         # used for ip_address, user_agent, country and referrer
         click_count = func.count(Click.id).label("clicks")
+        statement = select(column.label("value"), click_count)
         statement = (
-            select(column.label("value"), click_count)
-            .join(Click.url)
-            .where(URL.user_id == user_id)
+            self.only_these_clicks(statement, user_id, url_id)
             .group_by(column)
             .order_by(click_count.desc(), column)
             .limit(limit)
         )
         return list(self.db.execute(statement))
 
-    def clicks_per_city(self, user_id: int, limit: int) -> list:
+    def clicks_per_city(self, user_id: int | None, limit: int, url_id: int | None = None) -> list:
         # grouped by city AND country, so two towns with the same name stay apart
         click_count = func.count(Click.id).label("clicks")
+        statement = select(Click.city, Click.country, click_count)
         statement = (
-            select(Click.city, Click.country, click_count)
-            .join(Click.url)
-            .where(URL.user_id == user_id)
+            self.only_these_clicks(statement, user_id, url_id)
             .group_by(Click.city, Click.country)
             .order_by(click_count.desc(), Click.city)
             .limit(limit)
