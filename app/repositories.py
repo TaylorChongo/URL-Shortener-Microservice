@@ -23,16 +23,22 @@ class UserRepository:
         return user
 
 
+def clean_tag_names(names: list[str]) -> list[str]:
+    # " Shopping", "shopping" -> ["shopping"]: trimmed, lowercase, no repeats
+    clean_names = []
+    for name in names:
+        name = name.strip().lower()
+        if name and name not in clean_names:
+            clean_names.append(name)
+    return clean_names
+
+
 class TagRepository:
     def __init__(self, db: Session) -> None:
         self.db = db
 
     def get_or_create(self, names: list[str]) -> list[Tag]:
-        clean_names = []
-        for name in names:
-            name = name.strip().lower()
-            if name and name not in clean_names:
-                clean_names.append(name)
+        clean_names = clean_tag_names(names)
 
         if not clean_names:
             return []

@@ -14,7 +14,7 @@ from app.dependencies import (
     get_user_repository,
 )
 from app.models import URL, Click, User
-from app.repositories import TagRepository, URLRepository, UserRepository
+from app.repositories import TagRepository, URLRepository, UserRepository, clean_tag_names
 from app.schemas import (
     CityCount,
     CountryCount,
@@ -311,9 +311,15 @@ def get_url(
     description=(
         "Login required. Send only what you want to change. Leave a field out to keep it. "
         "Send null to clear an optional field (custom_alias, title, description, favicon, expires_at). "
-        "Send is_active false to switch the link off."
+        "Send is_active false to switch the link off. "
+        "If nothing you sent differs from the current values, the answer is 400."
     ),
-    responses={**NOT_LOGGED_IN, **NOT_FOUND, **ALIAS_TAKEN},
+    responses={
+        400: {"model": ErrorResponse, "description": "Nothing was sent, or nothing would change"},
+        **NOT_LOGGED_IN,
+        **NOT_FOUND,
+        **ALIAS_TAKEN,
+    },
 )
 def update_url(
     url_id: int,
@@ -324,17 +330,38 @@ def update_url(
 ) -> URLResponse:
     url = get_own_url_or_404(urls, current_user, url_id)
 
+    if not body.model_fields_set:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Send at least one field to update")
+
     # only the fields the user actually sent (exclude_unset), e.g. {"title": "New", "expires_at": None}
-    changes = body.model_dump(exclude_unset=True, exclude={"url", "tags"})
+    sent = body.model_dump(exclude_unset=True, exclude={"url", "tags"})
     if "url" in body.model_fields_set:
-        changes["original_url"] = str(body.url)
+        sent["original_url"] = str(body.url)
+
+    # keep only the fields whose value really differs from what is stored now
+    changes = {}
+    for field_name, value in sent.items():
+        if getattr(url, field_name) != value:
+            changes[field_name] = value
+
+    # tags: compare the tidied names, in any order
+    tags_changed = False
+    if "tags" in body.model_fields_set:
+        current_names = sorted(tag.name for tag in url.tags)
+        tags_changed = sorted(clean_tag_names(body.tags)) != current_names
+
+    if not changes and not tags_changed:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Nothing to update: the values you sent are the same as the current ones",
+        )
 
     new_alias = changes.get("custom_alias")
-    if new_alias is not None and new_alias != url.custom_alias and not alias_is_available(urls, new_alias):
+    if new_alias is not None and not alias_is_available(urls, new_alias):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
 
     new_tags = None
-    if "tags" in body.model_fields_set:
+    if tags_changed:
         new_tags = tags.get_or_create(body.tags)
 
     try:
