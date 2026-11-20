@@ -2,3 +2,5 @@
 .env
 __pycache__/
 *.pyc
+# IP location file (large, downloaded separately, refreshed monthly)
+data/*.mmdb

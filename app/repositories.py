@@ -99,8 +99,23 @@ class URLRepository:
         self.db.delete(url)
         self.db.commit()
 
-    def add_click(self, url: URL, ip_address: str, user_agent: str, referrer: str | None) -> None:
-        click = Click(url_id=url.id, ip_address=ip_address, user_agent=user_agent, referrer=referrer)
+    def add_click(
+        self,
+        url: URL,
+        ip_address: str,
+        user_agent: str,
+        referrer: str | None,
+        country: str | None,
+        city: str | None,
+    ) -> None:
+        click = Click(
+            url_id=url.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            referrer=referrer,
+            country=country,
+            city=city,
+        )
         self.db.add(click)
         # +1 is done by Postgres ("current value + 1"), so two visits at the same moment are both counted
         self.db.execute(update(URL).where(URL.id == url.id).values(click_count=URL.click_count + 1))

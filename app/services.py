@@ -1,6 +1,7 @@
 import secrets
 import string
 
+from app.geoip import find_location
 from app.models import URL
 from app.repositories import TagRepository, URLRepository
 
@@ -50,4 +51,7 @@ class UrlShortenerService:
         return self.urls.get_by_code(code)
 
     def record_visit(self, url: URL, ip_address: str, user_agent: str, referrer: str | None) -> None:
-        self.urls.add_click(url, ip_address=ip_address, user_agent=user_agent, referrer=referrer)
+        country, city = find_location(ip_address)
+        self.urls.add_click(
+            url, ip_address=ip_address, user_agent=user_agent, referrer=referrer, country=country, city=city
+        )

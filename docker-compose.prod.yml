@@ -3,7 +3,9 @@
 services:
   api:
     command: !reset null
-    volumes: !reset []
+    # code stays baked into the image; only the IP location file is shared (read-only)
+    volumes: !override
+      - ./data:/app/data:ro
     environment:
       APP_ENV: production
       DEBUG: "False"
