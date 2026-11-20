@@ -3,9 +3,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse
+from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.exc import IntegrityError
 
-from app.config import BASE_URL
+from app.config import ACCESS_TOKEN_MINUTES, BASE_URL
 from app.dependencies import (
     get_current_user,
     get_shortener_service,
@@ -16,15 +17,18 @@ from app.dependencies import (
 from app.models import URL, Click, User
 from app.repositories import TagRepository, URLRepository, UserRepository, clean_tag_names
 from app.schemas import (
+    AccessTokenResponse,
     CityCount,
     CountryCount,
     DayClicks,
     ErrorResponse,
     IPAddressCount,
     ReferrerCount,
+    RefreshRequest,
     ShortenRequest,
     StatsResponse,
     TagCount,
+    TokenResponse,
     TopURL,
     URLResponse,
     URLUpdate,
@@ -33,7 +37,14 @@ from app.schemas import (
     UserRead,
     ValidationErrorResponse,
 )
-from app.security import hash_password
+from app.security import (
+    InvalidTokenError,
+    create_access_token,
+    create_refresh_token,
+    hash_password,
+    read_token,
+    verify_password,
+)
 from app.services import AliasTakenError, DuplicateURLError, UrlShortenerService, alias_is_available
 
 API_PREFIX = "/api/v1"
@@ -155,19 +166,64 @@ def register(
 
 @auth_router.post(
     "/login",
-    response_model=UserRead,
-    summary="Check your email and password",
+    response_model=TokenResponse,
+    summary="Log in and receive an access token and a refresh token",
     description=(
-        "Uses HTTP Basic authentication. In Swagger, click the 'Authorize' button, "
-        "enter your email as the username and your password, then call this endpoint."
+        "Send your email (in the 'username' field, as the OAuth2 standard names it) and your password "
+        "as form data. You get an access token (valid 30 minutes) to send with every request, and a "
+        "refresh token (valid 7 days) to get new access tokens. In Swagger, use the 'Authorize' button: "
+        "it logs in through this endpoint and keeps the token for you."
     ),
     responses={
         401: {"model": ErrorResponse, "description": "The email or password is incorrect"},
         403: {"model": ErrorResponse, "description": "The account is disabled"},
     },
 )
-def login(current_user: User = Depends(get_current_user)) -> UserRead:
-    return current_user
+def login(
+    form: OAuth2PasswordRequestForm = Depends(),
+    users: UserRepository = Depends(get_user_repository),
+) -> TokenResponse:
+    user = users.get_by_email(form.username.lower())
+
+    # same message for "unknown email" and "wrong password", so nobody can find out who has an account
+    if user is None or not verify_password(form.password, user.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled")
+
+    return TokenResponse(
+        access_token=create_access_token(user.id),
+        refresh_token=create_refresh_token(user.id),
+        expires_in=ACCESS_TOKEN_MINUTES * 60,
+    )
+
+
+@auth_router.post(
+    "/refresh",
+    response_model=AccessTokenResponse,
+    summary="Get a new access token",
+    description="Send the refresh token you got at login. You get a new access token, without typing your password again.",
+    responses={
+        401: {"model": ErrorResponse, "description": "The refresh token is invalid or has expired: log in again"},
+        403: {"model": ErrorResponse, "description": "The account is disabled"},
+    },
+)
+def refresh(
+    body: RefreshRequest,
+    users: UserRepository = Depends(get_user_repository),
+) -> AccessTokenResponse:
+    try:
+        user_id = read_token(body.refresh_token, expected_type="refresh")
+    except InvalidTokenError as error:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(error))
+
+    user = users.get_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+    if not user.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This account is disabled")
+
+    return AccessTokenResponse(access_token=create_access_token(user.id), expires_in=ACCESS_TOKEN_MINUTES * 60)
 
 
 # ---------- /api/v1/urls ----------

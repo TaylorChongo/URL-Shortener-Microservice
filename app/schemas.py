@@ -164,6 +164,23 @@ class UserRead(BaseModel):
     created_at: datetime
 
 
+class TokenResponse(BaseModel):
+    access_token: str = Field(description="Send it with every request: Authorization: Bearer <access_token>")
+    refresh_token: str = Field(description="Send it to /api/v1/auth/refresh to get a new access token")
+    token_type: str = Field(default="bearer", examples=["bearer"])
+    expires_in: int = Field(description="Seconds until the access token expires", examples=[1800])
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str = Field(description="The refresh token you received at login")
+
+
+class AccessTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = Field(default="bearer", examples=["bearer"])
+    expires_in: int = Field(description="Seconds until the access token expires", examples=[1800])
+
+
 class ErrorResponse(BaseModel):
     status_code: int = Field(examples=[404])
     message: str = Field(examples=["Short URL not found"])

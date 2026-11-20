@@ -1,14 +1,16 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
+from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
 from app.repositories import TagRepository, URLRepository, UserRepository
-from app.security import verify_password
+from app.security import InvalidTokenError, read_token
 from app.services import UrlShortenerService
 
-basic_auth = HTTPBasic()
+# Reads "Authorization: Bearer <access token>" from each request.
+# tokenUrl tells Swagger where to log in, so its "Authorize" button shows a login form.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 def get_shortener_service(db: Session = Depends(get_db)) -> UrlShortenerService:
@@ -28,16 +30,25 @@ def get_tag_repository(db: Session = Depends(get_db)) -> TagRepository:
 
 
 def get_current_user(
-    credentials: HTTPBasicCredentials = Depends(basic_auth),
+    token: str = Depends(oauth2_scheme),
     users: UserRepository = Depends(get_user_repository),
 ) -> User:
-    user = users.get_by_email(credentials.username.lower())
-
-    if user is None or not verify_password(credentials.password, user.hashed_password):
+    try:
+        user_id = read_token(token, expected_type="access")
+    except InvalidTokenError as error:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect email or password",
-            headers={"WWW-Authenticate": "Basic"},
+            detail=str(error),
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = users.get_by_id(user_id)
+    if user is None:
+        # the account was deleted after the token was made
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     if not user.is_active:
