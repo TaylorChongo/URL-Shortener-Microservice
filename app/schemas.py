@@ -88,12 +88,43 @@ class TagCount(BaseModel):
     urls: int = Field(examples=[3])
 
 
+class IPAddressCount(BaseModel):
+    ip_address: str = Field(description="The last part is hidden to protect the visitor", examples=["196.216.180.xxx"])
+    clicks: int = Field(examples=[5])
+
+
+class UserAgentCount(BaseModel):
+    user_agent: str = Field(examples=["Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) ..."])
+    clicks: int = Field(examples=[5])
+
+
+class CountryCount(BaseModel):
+    country: str = Field(examples=["Ghana"])
+    clicks: int = Field(examples=[12])
+
+
+class CityCount(BaseModel):
+    city: str = Field(examples=["Accra"])
+    country: str = Field(examples=["Ghana"])
+    clicks: int = Field(examples=[9])
+
+
+class ReferrerCount(BaseModel):
+    referrer: str = Field(description="The page visitors came from, or 'Direct'", examples=["https://twitter.com/ama/status/1"])
+    clicks: int = Field(examples=[8])
+
+
 class StatsResponse(BaseModel):
     total_urls: int = Field(examples=[8])
     total_clicks: int = Field(examples=[42])
     top_urls: list[TopURL]
     clicks_last_7_days: list[DayClicks]
     urls_per_tag: list[TagCount]
+    clicks_per_ip_address: list[IPAddressCount]
+    clicks_per_user_agent: list[UserAgentCount]
+    clicks_per_country: list[CountryCount]
+    clicks_per_city: list[CityCount]
+    clicks_per_referrer: list[ReferrerCount]
 
 
 class UserCreate(BaseModel):

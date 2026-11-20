@@ -13,15 +13,20 @@ from app.dependencies import (
     get_url_repository,
     get_user_repository,
 )
-from app.models import URL, User
+from app.models import URL, Click, User
 from app.repositories import TagRepository, URLRepository, UserRepository
 from app.schemas import (
-    ErrorResponse,
+    CityCount,
+    CountryCount,
     DayClicks,
+    ErrorResponse,
+    IPAddressCount,
+    ReferrerCount,
     ShortenRequest,
     StatsResponse,
     TagCount,
     TopURL,
+    UserAgentCount,
     URLResponse,
     URLUpdate,
     UserCreate,
@@ -107,6 +112,20 @@ def to_url_response(url: URL) -> URLResponse:
 
 
 ALIAS_TAKEN = {409: {"model": ErrorResponse, "description": "This custom alias is already used"}}
+
+# how many rows each "clicks per ..." statistics list shows
+TOP = 10
+
+
+def hide_ip(ip_address) -> str:
+    # The full IP stays in the database; stats only show part of it, to protect the visitor.
+    # IPv4: 196.216.180.1 -> 196.216.180.xxx    IPv6: keep the first 4 groups only
+    ip = ipaddress.ip_address(str(ip_address))
+    if ip.version == 4:
+        parts = str(ip).split(".")
+        return ".".join(parts[:3]) + ".xxx"
+    groups = ip.exploded.split(":")
+    return ":".join(groups[:4]) + ":xxxx:xxxx:xxxx:xxxx"
 
 
 def visitor_ip(request: Request) -> str:
@@ -227,7 +246,8 @@ def list_urls(
     summary="Statistics about your URLs",
     description=(
         "Login required. Totals across all your links: how many links and clicks you have, "
-        "your 5 most clicked links, clicks per day for the last 7 days, and how many links use each tag."
+        "your 5 most clicked links, clicks per day for the last 7 days, how many links use each tag, "
+        "and the top 10 visitors' IP addresses (partly hidden), user agents, countries, cities and referrers."
     ),
     responses={**NOT_LOGGED_IN},
 )
@@ -245,6 +265,26 @@ def get_stats(
         ],
         clicks_last_7_days=[DayClicks(day=row.day, clicks=row.clicks) for row in urls.clicks_per_day(user_id, days=7)],
         urls_per_tag=[TagCount(tag=row.name, urls=row.urls) for row in urls.urls_per_tag(user_id)],
+        clicks_per_ip_address=[
+            IPAddressCount(ip_address=hide_ip(row.value), clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.ip_address, limit=TOP)
+        ],
+        clicks_per_user_agent=[
+            UserAgentCount(user_agent=row.value or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.user_agent, limit=TOP)
+        ],
+        clicks_per_country=[
+            CountryCount(country=row.value or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.country, limit=TOP)
+        ],
+        clicks_per_city=[
+            CityCount(city=row.city or "Unknown", country=row.country or "Unknown", clicks=row.clicks)
+            for row in urls.clicks_per_city(user_id, limit=TOP)
+        ],
+        clicks_per_referrer=[
+            ReferrerCount(referrer=row.value or "Direct", clicks=row.clicks)
+            for row in urls.clicks_grouped_by(user_id, Click.referrer, limit=TOP)
+        ],
     )
 
 

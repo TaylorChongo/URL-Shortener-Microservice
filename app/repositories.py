@@ -162,3 +162,30 @@ class URLRepository:
             .order_by(url_count.desc(), Tag.name)
         )
         return list(self.db.execute(statement))
+
+    def clicks_grouped_by(self, user_id: int, column, limit: int) -> list:
+        # "count this user's clicks per value of <column>, most first"
+        # used for ip_address, user_agent, country and referrer
+        click_count = func.count(Click.id).label("clicks")
+        statement = (
+            select(column.label("value"), click_count)
+            .join(Click.url)
+            .where(URL.user_id == user_id)
+            .group_by(column)
+            .order_by(click_count.desc(), column)
+            .limit(limit)
+        )
+        return list(self.db.execute(statement))
+
+    def clicks_per_city(self, user_id: int, limit: int) -> list:
+        # grouped by city AND country, so two towns with the same name stay apart
+        click_count = func.count(Click.id).label("clicks")
+        statement = (
+            select(Click.city, Click.country, click_count)
+            .join(Click.url)
+            .where(URL.user_id == user_id)
+            .group_by(Click.city, Click.country)
+            .order_by(click_count.desc(), Click.city)
+            .limit(limit)
+        )
+        return list(self.db.execute(statement))
