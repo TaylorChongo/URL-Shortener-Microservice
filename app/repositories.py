@@ -107,11 +107,13 @@ class URLRepository:
         )
         return self.db.scalar(statement)
 
-    def list_for_user(self, user_id: int, limit: int, offset: int) -> list[URL]:
+    def list_for_user(self, user_id: int, limit: int, offset: int, tag: str | None = None) -> list[URL]:
+        statement = select(URL).where(URL.user_id == user_id)
+        if tag is not None:
+            # "links for which SOME tag has this name" -> EXISTS (...) through url_tags
+            statement = statement.where(URL.tags.any(Tag.name == tag))
         statement = (
-            select(URL)
-            .where(URL.user_id == user_id)
-            .options(selectinload(URL.tags))
+            statement.options(selectinload(URL.tags))
             .order_by(URL.id.desc())
             .limit(limit)
             .offset(offset)

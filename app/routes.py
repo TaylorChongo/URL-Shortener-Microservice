@@ -294,16 +294,24 @@ def create_short_url(
     "",
     response_model=list[URLResponse],
     summary="List your URLs",
-    description="Login required. Returns only your own links, newest first, one page at a time.",
+    description=(
+        "Login required. Returns only your own links, newest first, one page at a time. "
+        "Add ?tag=books to list only the links with that tag."
+    ),
     responses={**NOT_LOGGED_IN},
 )
 def list_urls(
     limit: int = Query(default=20, ge=1, le=100, description="How many links per page"),
     offset: int = Query(default=0, ge=0, description="How many links to skip"),
+    tag: str | None = Query(default=None, min_length=1, max_length=50, description="Only links with this tag"),
     current_user: User = Depends(get_current_user),
     urls: URLRepository = Depends(get_url_repository),
 ) -> list[URLResponse]:
-    page = urls.list_for_user(user_id=current_user.id, limit=limit, offset=offset)
+    tag_name = None
+    if tag is not None:
+        # tidy it like saved tags are tidied: " Books " -> "books"
+        tag_name = tag.strip().lower()
+    page = urls.list_for_user(user_id=current_user.id, limit=limit, offset=offset, tag=tag_name)
     return [to_url_response(url) for url in page]
 
 
