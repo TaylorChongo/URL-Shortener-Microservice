@@ -157,6 +157,16 @@ class URLRepository:
     def count_urls(self, user_id: int) -> int:
         return self.db.scalar(select(func.count(URL.id)).where(URL.user_id == user_id))
 
+    def count_active_urls(self, user_id: int) -> int:
+        # "active" = switched on AND not expired (no expiry date, or one still in the future)
+        now = datetime.now(timezone.utc)
+        statement = select(func.count(URL.id)).where(
+            URL.user_id == user_id,
+            URL.is_active.is_(True),
+            or_(URL.expires_at.is_(None), URL.expires_at > now),
+        )
+        return self.db.scalar(statement)
+
     def count_clicks(self, user_id: int) -> int:
         # add up the stored counters; coalesce turns "no links" (NULL) into 0
         statement = select(func.coalesce(func.sum(URL.click_count), 0)).where(URL.user_id == user_id)

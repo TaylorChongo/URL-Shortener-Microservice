@@ -47,7 +47,16 @@ from app.security import (
     read_token,
     verify_password,
 )
-from app.services import AliasTakenError, DuplicateURLError, UrlShortenerService, alias_is_available
+from app.services import (
+    AliasTakenError,
+    DuplicateURLError,
+    TierLimitError,
+    UrlShortenerService,
+    alias_is_available,
+    check_can_add_active_link,
+    check_can_use_alias,
+    is_live,
+)
 
 API_PREFIX = "/api/v1"
 
@@ -57,6 +66,7 @@ TOP = 10
 NOT_LOGGED_IN = {401: {"model": ErrorResponse, "description": "You are not logged in"}}
 NOT_FOUND = {404: {"model": ErrorResponse, "description": "No link with this short code belongs to you"}}
 CONFLICT = {409: {"model": ErrorResponse, "description": "This custom alias is already used, or you already shortened this URL"}}
+TIER_LIMIT = {403: {"model": ErrorResponse, "description": "Free accounts: at most 10 active links, and no custom alias"}}
 
 
 # ---------- helpers ----------
@@ -246,10 +256,12 @@ urls_router = APIRouter(prefix=f"{API_PREFIX}/urls", tags=["urls"])
     description=(
         "Login required. Send a long URL and get back a unique 6-character short code and a "
         "ready-to-share short link. Optional: tags, a custom alias, a title, a description, a favicon "
-        "and an expiry date. The link belongs to you."
+        "and an expiry date. The link belongs to you. Free accounts can have at most 10 active links "
+        "and cannot use a custom alias."
     ),
     responses={
         **NOT_LOGGED_IN,
+        **TIER_LIMIT,
         **CONFLICT,
         422: {"model": ValidationErrorResponse, "description": "One of the fields is not valid"},
     },
@@ -262,10 +274,12 @@ def create_short_url(
     details = body.model_dump(include={"custom_alias", "title", "description", "favicon", "expires_at"})
     try:
         url = service.shorten(
-            user_id=current_user.id, original_url=str(body.url), tag_names=body.tags, details=details
+            user=current_user, original_url=str(body.url), tag_names=body.tags, details=details
         )
     except DuplicateURLError as error:
         raise_already_shortened(error.existing)
+    except TierLimitError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error))
     except AliasTakenError:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
     except IntegrityError as error:
@@ -372,6 +386,7 @@ def get_url(
     responses={
         400: {"model": ErrorResponse, "description": "Nothing was sent, or nothing would change"},
         **NOT_LOGGED_IN,
+        **TIER_LIMIT,
         **NOT_FOUND,
         **CONFLICT,
     },
@@ -383,6 +398,7 @@ def get_url(
     responses={
         400: {"model": ErrorResponse, "description": "Nothing was sent, or nothing would change"},
         **NOT_LOGGED_IN,
+        **TIER_LIMIT,
         **NOT_FOUND,
         **CONFLICT,
     },
@@ -422,7 +438,20 @@ def update_url(
             detail="Nothing to update: the values you sent are the same as the current ones",
         )
 
+    # tier rules: setting an alias is premium-only (removing one, with null, is always allowed),
+    # and a link that comes back to life (switched on again, or expiry removed/extended) counts
+    # towards the free limit of active links
     new_alias = changes.get("custom_alias")
+    live_now = is_live(url.is_active, url.expires_at)
+    live_after = is_live(changes.get("is_active", url.is_active), changes.get("expires_at", url.expires_at))
+    try:
+        if new_alias is not None:
+            check_can_use_alias(current_user)
+        if not live_now and live_after:
+            check_can_add_active_link(urls, current_user)
+    except TierLimitError as error:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error))
+
     if new_alias is not None and not alias_is_available(urls, new_alias):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This custom alias is already used")
 
